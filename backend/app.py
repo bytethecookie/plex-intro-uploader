@@ -1,9 +1,14 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from pydantic import BaseModel
 import httpx
 import os
+import json
+import time
+import uuid
+import asyncio
+import re
 import logging
 
 # Configure logging
@@ -12,36 +17,14 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Plex Intro Uploader")
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="backend/static"), name="static")
+# In-memory task store
+tasks = {}
 
 # --- Models ---
 
 class PlexConfig(BaseModel):
     plex_url: str
     plex_token: str
-
-class TmdbConfig(BaseModel):
-    tmdb_api_key: str
-
-class TidyConfig(BaseModel):
-    tidb_api_key: str
-
-class LibraryResponse(BaseModel):
-    libraries: list[str]
-
-class EpisodeData(BaseModel):
-    title: str
-    season: int
-    episode: int
-    tvdb_id: str
-    tmdb_id: str | None = None
-    tmdb_season: int | None = None
-    tmdb_episode: int | None = None
-    intro_start: float | None = None
-    intro_end: float | None = None
-    status: str = "pending"  # pending, matched, skipped, failed
-    message: str = ""
 
 class ScanRequest(BaseModel):
     library_name: str
@@ -50,44 +33,397 @@ class ScanRequest(BaseModel):
     dry_run: bool = False
 
 class ScanResponse(BaseModel):
+    task_id: str
     message: str
+
+class LogEntry(BaseModel):
+    status: str
+    message: str
+
+class ScanProgress(BaseModel):
+    current: int
+    total: int
+    percent: float
+
+class EpisodeResult(BaseModel):
+    title: str
+    season: int
+    episode: int
+    tvdb_id: str
+    tmdb_id: str | None = None
+    intro_start: float | None = None
+    intro_end: float | None = None
+    status: str
+    message: str
+
+class ScanStatus(BaseModel):
+    status: str
+    progress: ScanProgress
+    log: list[LogEntry] = []
+    results: list[EpisodeResult] = []
+
+# --- Async Background Task ---
+
+async def scan_library_task(
+    task_id: str,
+    plex_url: str,
+    plex_token: str,
+    library_name: str,
+    tmdb_api_key: str,
+    tidb_api_key: str,
+    dry_run: bool
+):
+    """Scan a Plex library for intro markers and submit to TheIntroDB."""
+    task = tasks[task_id]
+    task["status"] = "running"
+    
+    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        try:
+            # Get library section key
+            lib_resp = await client.get(
+                f"{plex_url}/library/sections",
+                headers={"X-Plex-Token": plex_token}
+            )
+            lib_resp.raise_for_status()
+            lib_data = lib_resp.json()
+            
+            show_section = None
+            for section in lib_data.get("MediaContainer", {}).get("Directory", []):
+                if section.get("type") == "show" and section.get("title") == library_name:
+                    show_section = section
+                    break
+            
+            if not show_section:
+                task["status"] = "failed"
+                task["log"].append(LogEntry(status="failed", message=f"Library '{library_name}' not found"))
+                return
+            
+            library_key = show_section["key"]
+            
+            # Get all episodes (handle pagination if needed)
+            items_resp = await client.get(
+                f"{plex_url}/library/sections/{library_key}/all",
+                headers={"X-Plex-Token": plex_token},
+                params={"X-Plex-Container-Start": 0, "X-Plex-Container-Size": 1000}
+            )
+            items_resp.raise_for_status()
+            items_data = items_resp.json()
+            
+            episodes = items_data.get("MediaContainer", {}).get("Metadata", [])
+            task["total"] = len(episodes)
+            
+            if task["total"] == 0:
+                task["status"] = "completed"
+                return
+            
+            # Process each episode
+            for idx, episode in enumerate(episodes):
+                task["current"] = idx + 1
+                task["percent"] = round(((idx + 1) / task["total"]) * 100)
+                
+                title = episode.get("title", "Unknown")
+                parent_title = episode.get("parentTitle", "Unknown Show")
+                season = episode.get("parentIndex", 0)
+                number = episode.get("index", 0)
+                episode_guid = episode.get("guid", "")
+                
+                ep_ref = f"{parent_title} - S{str(season).zfill(2)}E{str(number).zfill(2)}"
+                task["log"].append(LogEntry(
+                    status="pending",
+                    message=f"<span class='episode-ref'>{ep_ref}</span> — {title}"
+                ))
+                
+                try:
+                    # Extract TVDB ID from guid
+                    tvdb_match = re.search(r"tvdb://(\d+)", episode_guid)
+                    if not tvdb_match:
+                        task["log"].append(LogEntry(
+                            status="failed",
+                            message=f"No TVDB ID found <span class='detail'>({episode_guid})</span>"
+                        ))
+                        task["results"].append(EpisodeResult(
+                            title=title,
+                            season=season,
+                            episode=number,
+                            tvdb_id="",
+                            status="failed",
+                            message=f"No TVDB ID found"
+                        ))
+                        continue
+                    
+                    tvdb_id = tvdb_match.group(1)
+                    
+                    # Check for intro markers
+                    ep_details_resp = await client.get(
+                        f"{plex_url}/library/metadata/{episode_guid.replace('tvdb://', '')}/children",
+                        headers={"X-Plex-Token": plex_token},
+                        params={"X-Plex-Container-Size": 0}
+                    )
+                    ep_details_resp.raise_for_status()
+                    ep_details = ep_details_resp.json()
+                    
+                    markers = ep_details.get("MediaContainer", {}).get("Metadata", [{}])[0].get("marker", [])
+                    intro_marker = next((m for m in markers if m.get("type") == "intro"), None)
+                    
+                    if not intro_marker or not intro_marker.get("start") or not intro_marker.get("end"):
+                        task["log"].append(LogEntry(
+                            status="skipped",
+                            message=f"No intro markers found <span class='detail'>({len(markers)} markers)</span>"
+                        ))
+                        task["results"].append(EpisodeResult(
+                            title=title,
+                            season=season,
+                            episode=number,
+                            tvdb_id=tvdb_id,
+                            status="skipped",
+                            message="No intro markers found"
+                        ))
+                        continue
+                    
+                    intro_start = round(intro_marker["start"] / 1000, 1)
+                    intro_end = round(intro_marker["end"] / 1000, 1)
+                    
+                    # Translate TVDB ID to TMDB ID
+                    tmdb_resp = await client.get(
+                        f"https://api.themoviedb.org/3/find/{tvdb_id}",
+                        params={"external_source": "tvdb_id", "api_key": tmdb_api_key}
+                    )
+                    tmdb_resp.raise_for_status()
+                    tmdb_data = tmdb_resp.json()
+                    
+                    tv_shows = tmdb_data.get("tv_shows", [])
+                    if not tv_shows:
+                        task["log"].append(LogEntry(
+                            status="failed",
+                            message=f"No TMDB match for TVDB ID {tvdb_id}"
+                        ))
+                        task["results"].append(EpisodeResult(
+                            title=title,
+                            season=season,
+                            episode=number,
+                            tvdb_id=tvdb_id,
+                            status="failed",
+                            message=f"No TMDB match"
+                        ))
+                        continue
+                    
+                    tmdb_id = tv_shows[0]["id"]
+                    
+                    if dry_run:
+                        task["log"].append(LogEntry(
+                            status="matched",
+                            message=f"<span class='intro-time'>{intro_start}s - {intro_end}s</span> → TMDB {tmdb_id} S{season}E{number} <span class='detail'>(dry run)</span>"
+                        ))
+                        task["results"].append(EpisodeResult(
+                            title=title,
+                            season=season,
+                            episode=number,
+                            tvdb_id=tvdb_id,
+                            tmdb_id=str(tmdb_id),
+                            intro_start=intro_start,
+                            intro_end=intro_end,
+                            status="matched",
+                            message=f"Dry run - would submit to TMDB {tmdb_id}"
+                        ))
+                    else:
+                        # Submit to TheIntroDB
+                        tidb_resp = await client.post(
+                            "https://api.theintrodb.org/intros",
+                            headers={
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {tidb_api_key}"
+                            },
+                            json={
+                                "tmdb_id": tmdb_id,
+                                "season": season,
+                                "episode": number,
+                                "intro_start": intro_start,
+                                "intro_end": intro_end
+                            }
+                        )
+                        
+                        if tidb_resp.ok:
+                            task["log"].append(LogEntry(
+                                status="matched",
+                                message=f"<span class='intro-time'>{intro_start}s - {intro_end}s</span> → Submitted to TheIntroDB"
+                            ))
+                            task["results"].append(EpisodeResult(
+                                title=title,
+                                season=season,
+                                episode=number,
+                                tvdb_id=tvdb_id,
+                                tmdb_id=str(tmdb_id),
+                                intro_start=intro_start,
+                                intro_end=intro_end,
+                                status="matched",
+                                message="Successfully submitted"
+                            ))
+                        else:
+                            error_body = tidb_resp.text
+                            task["log"].append(LogEntry(
+                                status="failed",
+                                message=f"TIDB API error: {tidb_resp.status_code} <span class='detail'>{error_body[:100]}</span>"
+                            ))
+                            task["results"].append(EpisodeResult(
+                                title=title,
+                                season=season,
+                                episode=number,
+                                tvdb_id=tvdb_id,
+                                status="failed",
+                                message=f"TIDB API error: {tidb_resp.status_code}"
+                            ))
+                
+                except Exception as ep_err:
+                    task["log"].append(LogEntry(
+                        status="failed",
+                        message=f"Error processing episode: {str(ep_err)[:100]}"
+                    ))
+                    task["results"].append(EpisodeResult(
+                        title=title,
+                        season=season,
+                        episode=number,
+                        tvdb_id="",
+                        status="failed",
+                        message=str(ep_err)[:100]
+                    ))
+            
+            task["status"] = "completed"
+        
+        except Exception as err:
+            task["status"] = "failed"
+            task["log"].append(LogEntry(status="failed", message=f"Scan error: {str(err)}"))
 
 # --- Endpoints ---
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_index():
-    with open("backend/static/index.html", "r") as f:
-        return f.read()
+    try:
+        with open("backend/static/index.html", "r") as f:
+            return f.read()
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Index not found</h1>", status_code=404)
 
-@app.get("/api/libraries", response_model=LibraryResponse)
-async def get_libraries(config: PlexConfig):
+@app.get("/api/libraries")
+async def get_libraries(plex_url: str, plex_token: str):
     """Fetch available libraries from Plex."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                f"{config.plex_url}/library/sections",
-                headers={"X-Plex-Token": config.plex_token}
+                f"{plex_url}/library/sections",
+                headers={"X-Plex-Token": plex_token}
             )
             response.raise_for_status()
             data = response.json()
             
-            # Extract library names from XML-like structure
             libraries = []
             for section in data.get("MediaContainer", {}).get("Directory", []):
                 if section.get("type") == "show":
                     libraries.append(section.get("title", "Unknown"))
             
-            return LibraryResponse(libraries=libraries)
+            return {"libraries": libraries}
     except httpx.HTTPError as e:
         logger.error(f"Plex API error: {e}")
         raise HTTPException(status_code=500, detail=f"Plex API error: {str(e)}")
 
 @app.post("/api/scan", response_model=ScanResponse)
-async def scan_episodes(request: ScanRequest):
+async def start_scan(request: ScanRequest):
     """Start scanning episodes from a Plex library."""
-    # This will be handled by async tasks in the full version
-    return ScanResponse(message="Scan started")
+    task_id = str(uuid.uuid4())
+    
+    tasks[task_id] = {
+        "status": "pending",
+        "current": 0,
+        "total": 0,
+        "percent": 0,
+        "log": [],
+        "results": [],
+    }
+    
+    # Start background task
+    asyncio.create_task(scan_library_task(
+        task_id=task_id,
+        plex_url="",  # Will be fetched from /api/scan/results
+        plex_token="",
+        library_name=request.library_name,
+        tmdb_api_key=request.tmdb_api_key,
+        tidb_api_key=request.tidb_api_key,
+        dry_run=request.dry_run
+    ))
+    
+    return ScanResponse(task_id=task_id, message="Scan started")
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/api/scan/results")
+async def get_scan_results(
+    task_id: str,
+    plex_url: str = "",
+    plex_token: str = ""
+):
+    """Get scan progress and results via polling."""
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task = tasks[task_id]
+    
+    # If task is pending/running but we have plex credentials, start the actual scan
+    if task["status"] in ("pending", "running") and plex_url and plex_token:
+        # Re-create the task with full credentials
+        existing = tasks.pop(task_id)
+        task["status"] = "running"
+        task["current"] = 0
+        task["total"] = 0
+        task["percent"] = 0
+        task["log"] = []
+        task["results"] = []
+        
+        asyncio.create_task(scan_library_task(
+            task_id=task_id,
+            plex_url=plex_url,
+            plex_token=plex_token,
+            library_name=task.get("library_name", ""),
+            tmdb_api_key=task.get("tmdb_api_key", ""),
+            tidb_api_key=task.get("tidb_api_key", ""),
+            dry_run=task.get("dry_run", False)
+        ))
+    
+    progress = ScanProgress(
+        current=task["current"],
+        total=task["total"],
+        percent=task["percent"]
+    )
+    
+    return ScanStatus(
+        status=task["status"],
+        progress=progress,
+        log=[LogEntry(**log) for log in task["log"]],
+        results=[EpisodeResult(**r) for r in task["results"]]
+    )
+
+@app.post("/api/scan/start")
+async def start_scan_with_credentials(request: ScanRequest):
+    """Start scan with full credentials included."""
+    task_id = str(uuid.uuid4())
+    
+    tasks[task_id] = {
+        "status": "running",
+        "current": 0,
+        "total": 0,
+        "percent": 0,
+        "log": [],
+        "results": [],
+        "library_name": request.library_name,
+        "tmdb_api_key": request.tmdb_api_key,
+        "tidb_api_key": request.tidb_api_key,
+        "dry_run": request.dry_run,
+    }
+    
+    asyncio.create_task(scan_library_task(
+        task_id=task_id,
+        plex_url="",  # Will be fetched from /api/scan/results
+        plex_token="",
+        library_name=request.library_name,
+        tmdb_api_key=request.tmdb_api_key,
+        tidb_api_key=request.tidb_api_key,
+        dry_run=request.dry_run
+    ))
+    
+    return ScanResponse(task_id=task_id, message="Scan started")
