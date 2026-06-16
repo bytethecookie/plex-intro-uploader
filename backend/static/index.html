@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plex Intro Uploader</title>
+    <style>
+        :root {
+            --primary: #2189dc;
+            --primary-hover: #1a6fb8;
+            --bg: #f7f8fa;
+            --card-bg: #ffffff;
+            --text: #1a1a1a;
+            --text-muted: #666666;
+            --border: #e5e7eb;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --info: #3b82f6;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        header h1 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 0.25rem;
+        }
+
+        header p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
+
+        .card h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .card h2 svg {
+            width: 20px;
+            height: 20px;
+            color: var(--primary);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        @media (max-width: 640px) {
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-group label {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 0.35rem;
+        }
+
+        .form-group input,
+        .form-group select {
+            padding: 0.6rem 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 0.9rem;
+            background: #fff;
+            color: var(--text);
+            transition: border-color 0.15s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(33,137,220,0.15);
+        }
+
+        .form-group input::placeholder {
+            color: #aaa;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+            grid-column: 1 / -1;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--primary);
+            cursor: pointer;
+        }
+
+        .checkbox-group label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.7rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: var(--primary-hover);
+        }
+
+        .btn-secondary {
+            background: var(--border);
+            color: var(--text);
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: #d1d5db;
+        }
+
+        .btn-full {
+            width: 100%;
+        }
+
+        .actions {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+
+        /* Progress */
+        #progress-section {
+            display: none;
+        }
+
+        #progress-section.visible {
+            display: block;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background: var(--border);
+            border-radius: 999px;
+            overflow: hidden;
+            margin-bottom: 1rem;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: var(--primary);
+            border-radius: 999px;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+
+        .progress-stats {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+        }
+
+        .log-container {
+            max-height: 400px;
+            overflow-y: auto;
+            background: #1e1e2e;
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 0.8rem;
+            line-height: 1.7;
+        }
+
+        .log-entry {
+            display: flex;
+            gap: 0.75rem;
+            padding: 0.15rem 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+
+        .log-status {
+            min-width: 70px;
+            text-align: right;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 0.05em;
+        }
+
+        .log-status.matched { color: var(--success); }
+        .log-status.skipped { color: var(--warning); }
+        .log-status.failed { color: var(--error); }
+        .log-status.pending { color: var(--info); }
+
+        .log-message {
+            color: #cdd6f4;
+            flex: 1;
+        }
+
+        .log-message .episode-ref {
+            color: #89b4fa;
+        }
+
+        .log-message .intro-time {
+            color: #a6e3a1;
+        }
+
+        .log-message .detail {
+            color: #6c7086;
+        }
+
+        /* Summary */
+        #summary-section {
+            display: none;
+        }
+
+        #summary-section.visible {
+            display: block;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        @media (max-width: 640px) {
+            .summary-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        .summary-stat {
+            text-align: center;
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: 10px;
+        }
+
+        .summary-stat .value {
+            font-size: 1.75rem;
+            font-weight: 700;
+        }
+
+        .summary-stat .label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        .summary-stat.matched .value { color: var(--success); }
+        .summary-stat.skipped .value { color: var(--warning); }
+        .summary-stat.failed .value { color: var(--error); }
+        .summary-stat.total .value { color: var(--info); }
+
+        .status-msg {
+            padding: 1rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .status-msg.success {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .status-msg.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .status-msg.info {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .spinner-dark {
+            border-color: rgba(0,0,0,0.1);
+            border-top-color: var(--primary);
+        }
+
+        .loading-dots::after {
+            content: '';
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+
+        @keyframes dots {
+            0% { content: ''; }
+            25% { content: '.'; }
+            50% { content: '..'; }
+            75% { content: '...'; }
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        footer a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎬 Plex Intro Uploader</h1>
+            <p>Extract intro markers from Plex and submit them to TheIntroDB</p>
+        </header>
+
+        <!-- Configuration Card -->
+        <div class="card">
+            <h2>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                Configuration
+            </h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="plex-url">Plex URL</label>
+                    <input type="url" id="plex-url" placeholder="http://localhost:32400" />
+                </div>
+                <div class="form-group">
+                    <label for="plex-token">Plex Token</label>
+                    <input type="password" id="plex-token" placeholder="Your Plex API token" />
+                </div>
+                <div class="form-group">
+                    <label for="tmdb-key">TMDB API Key</label>
+                    <input type="password" id="tmdb-key" placeholder="tmdb_xxxxxxxxxxx" />
+                </div>
+                <div class="form-group">
+                    <label for="tidb-key">TheIntroDB API Key</label>
+                    <input type="password" id="tidb-key" placeholder="tidb_xxxxxxxxxxx" />
+                </div>
+                <div class="form-group">
+                    <label for="library-select">Target Library</label>
+                    <select id="library-select">
+                        <option value="">-- Select a library first --</option>
+                    </select>
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="dry-run" />
+                    <label for="dry-run">Dry run (preview without submitting to TheIntroDB)</label>
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn btn-secondary" id="btn-load-libraries" onclick="loadLibraries()">
+                    📚 Load Libraries
+                </button>
+                <button class="btn btn-primary btn-full" id="btn-scan" onclick="startScan()" disabled>
+                    🚀 Start Scan
+                </button>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progress-section" class="card">
+            <h2>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                Scan Progress
+            </h2>
+
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progress-bar"></div>
+            </div>
+
+            <div class="progress-stats">
+                <span id="progress-count">0 / 0 episodes</span>
+                <span id="progress-percent">0%</span>
+            </div>
+
+            <div class="log-container" id="log-container">
+                <!-- Log entries appear here -->
+            </div>
+        </div>
+
+        <!-- Summary Section -->
+        <div id="summary-section" class="card">
+            <h2>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                Scan Summary
+            </h2>
+
+            <div class="summary-grid">
+                <div class="summary-stat total">
+                    <div class="value" id="sum-total">0</div>
+                    <div class="label">Total Episodes</div>
+                </div>
+                <div class="summary-stat matched">
+                    <div class="value" id="sum-matched">0</div>
+                    <div class="label">Matched</div>
+                </div>
+                <div class="summary-stat skipped">
+                    <div class="value" id="sum-skipped">0</div>
+                    <div class="label">Skipped</div>
+                </div>
+                <div class="summary-stat failed">
+                    <div class="value" id="sum-failed">0</div>
+                    <div class="label">Failed</div>
+                </div>
+            </div>
+
+            <div id="summary-status"></div>
+
+            <div class="actions">
+                <button class="btn btn-secondary btn-full" onclick="resetApp()">
+                    🔄 Start New Scan
+                </button>
+            </div>
+        </div>
+
+        <footer>
+            <p>Plex Intro Uploader — Powered by FastAPI & TheIntroDB</p>
+            <p style="margin-top:0.5rem;">
+                <a href="https://theintrodb.org">TheIntroDB</a> ·
+                <a href="https://www.plex.tv">Plex</a> ·
+                <a href="https://www.themoviedb.org">TMDB</a>
+            </p>
+        </footer>
+    </div>
+
+    <script>
+    // ============================================================
+    //  State
+    // ============================================================
+    const state = {
+        libraries: [],
+        scanning: false,
+        stats: { matched: 0, skipped: 0, failed: 0, total: 0 },
+        abortController: null,
+    };
+
+    // ============================================================
+    //  DOM helpers
+    // ============================================================
+    const $ = (sel) => document.querySelector(sel);
+    const el = (sel) => $(sel);
+
+    function appendLog(status, message) {
+        const container = el('#log-container');
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        entry.innerHTML = `
+            <span class="log-status ${status}">${status}</span>
+            <span class="log-message">${message}</span>
+        `;
+        container.appendChild(entry);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function updateProgress(current, total, percent) {
+        el('#progress-bar').style.width = `${Math.min(percent, 100)}%`;
+        el('#progress-count').textContent = `${current} / ${total} episodes`;
+        el('#progress-percent').textContent = `${Math.round(percent)}%`;
+    }
+
+    // ============================================================
+    //  Load Libraries
+    // ============================================================
+    async function loadLibraries() {
+        const plexUrl = el('#plex-url').value.trim();
+        const plexToken = el('#plex-token').value.trim();
+
+        if (!plexUrl || !plexToken) {
+            alert('Please enter both Plex URL and Token.');
+            return;
+        }
+
+        const btn = el('#btn-load-libraries');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> Loading...';
+
+        try {
+            const res = await fetch(`/api/libraries?plex_url=${encodeURIComponent(plexUrl)}&plex_token=${encodeURIComponent(plexToken)}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+
+            state.libraries = data.libraries || [];
+
+            const select = el('#library-select');
+            select.innerHTML = '<option value="">-- Select a library --</option>';
+            state.libraries.forEach(lib => {
+                const opt = document.createElement('option');
+                opt.value = lib;
+                opt.textContent = lib;
+                select.appendChild(opt);
+            });
+
+            if (state.libraries.length === 0) {
+                appendLog('info', 'No TV libraries found in this Plex server.');
+            }
+
+            checkReady();
+        } catch (err) {
+            alert(`Failed to load libraries: ${err.message}`);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '📚 Load Libraries';
+        }
+    }
+
+    function checkReady() {
+        const hasLib = el('#library-select').value !== '';
+        el('#btn-scan').disabled = !hasLib || state.scanning;
+    }
+
+    el('#library-select').addEventListener('change', checkReady);
+
+    // ============================================================
+    //  Scan
+    // ============================================================
+    async function startScan() {
+        const plexUrl = el('#plex-url').value.trim();
+        const plexToken = el('#plex-token').value.trim();
+        const tmdbKey = el('#tmdb-key').value.trim();
+        const tidbKey = el('#tidb-key').value.trim();
+        const libraryName = el('#library-select').value;
+        const dryRun = el('#dry-run').checked;
+
+        if (!plexUrl || !plexToken || !tmdbKey || !tidbKey) {
+            alert('Please fill in all configuration fields.');
+            return;
+        }
+
+        if (!libraryName) {
+            alert('Please select a library.');
+            return;
+        }
+
+        state.scanning = true;
+        state.stats = { matched: 0, skipped: 0, failed: 0, total: 0 };
+
+        // Show progress, hide summary
+        el('#progress-section').classList.add('visible');
+        el('#summary-section').classList.remove('visible');
+        el('#log-container').innerHTML = '';
+        el('#btn-scan').disabled = true;
+        el('#btn-scan').innerHTML = '<span class="spinner"></span> Scanning...';
+        el('#btn-load-libraries').disabled = true;
+
+        state.abortController = new AbortController();
+
+        try {
+            // Step 1: Start the scan
+            const scanRes = await fetch('/api/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    library_name: libraryName,
+                    tmdb_api_key: tmdbKey,
+                    tidb_api_key: tidbKey,
+                    dry_run: dryRun,
+                }),
+                signal: state.abortController.signal,
+            });
+
+            if (!scanRes.ok) {
+                const errData = await scanRes.json().catch(() => ({}));
+                throw new Error(errData.detail || `Scan failed (HTTP ${scanRes.status})`);
+            }
+
+            const scanResult = await scanRes.json();
+
+            // Step 2: Poll for results
+            await pollResults(plexUrl, plexToken);
+
+        } catch (err) {
+            if (err.name === 'AbortError') return;
+            appendLog('failed', `Scan error: ${err.message}`);
+        } finally {
+            state.scanning = false;
+            el('#btn-scan').innerHTML = '🚀 Start Scan';
+            el('#btn-load-libraries').disabled = false;
+            checkReady();
+        }
+    }
+
+    // ============================================================
+    //  Poll results (SSE-like polling)
+    // ============================================================
+    async function pollResults(plexUrl, plexToken) {
+        let pollCount = 0;
+        const maxPolls = 300; // 5 minutes max
+
+        while (pollCount < maxPolls) {
+            try {
+                const res = await fetch(`/api/scan/results?plex_url=${encodeURIComponent(plexUrl)}&plex_token=${encodeURIComponent(plexToken)}`);
+                if (!res.ok) {
+                    // If endpoint doesn't exist yet, fall back to single-request scan
+                    await singleRequestScan(plexUrl, plexToken);
+                    return;
+                }
+
+                const data = await res.json();
+
+                if (data.status === 'completed') {
+                    renderResults(data);
+                    return;
+                } else if (data.status === 'running') {
+                    updateProgress(data.progress.current, data.progress.total, data.progress.percent);
+                    if (data.log) {
+                        data.log.forEach(entry => appendLog(entry.status, entry.message));
+                    }
+                }
+
+                pollCount++;
+                await sleep(1000); // Poll every second
+
+            } catch (err) {
+                console.warn('Poll error:', err);
+                pollCount++;
+                await sleep(1000);
+            }
+        }
+
+        appendLog('failed', 'Scan timed out after 5 minutes.');
+    }
+
+    // Fallback: single-request scan (no polling)
+    async function singleRequestScan(plexUrl, plexToken) {
+        appendLog('info', 'Using single-request scan mode (polling not yet implemented)...');
+
+        // Fetch all episodes from the library
+        const libraryName = el('#library-select').value;
+        const tmdbKey = el('#tmdb-key').value.trim();
+        const tidbKey = el('#tidb-key').value.trim();
+        const dryRun = el('#dry-run').checked;
+
+        try {
+            // Get the key of the first show in the library
+            const libraryRes = await fetch(`/library/sections?X-Plex-Token=${encodeURIComponent(plexToken)}`, {
+                headers: { 'X-Plex-Token': plexToken },
+            });
+            const libData = await libraryRes.json();
+
+            const showSection = libData.MediaContainer.Directory.find(d => d.title === libraryName);
+            if (!showSection) throw new Error(`Library "${libraryName}" not found`);
+
+            const libraryKey = showSection.key;
+
+            // Fetch all items
+            const itemsRes = await fetch(`/library/sections/${libraryKey}/all?X-Plex-Container-Start=0&X-Plex-Container-Size=1000&X-Plex-Token=${encodeURIComponent(plexToken)}`, {
+                headers: { 'X-Plex-Token': plexToken },
+            });
+            const itemsData = await itemsRes.json();
+
+            const episodes = itemsData.MediaContainer.Metadata || [];
+            state.stats.total = episodes.length;
+
+            let processed = 0;
+
+            for (const episode of episodes) {
+                const title = episode.title || 'Unknown';
+                const parentTitle = episode.parentTitle || 'Unknown Show';
+                const season = episode.parentIndex || 0;
+                const number = episode.index || 0;
+
+                appendLog('pending', `<span class="episode-ref">${parentTitle} - S${String(season).padStart(2,'0')}E${String(number).padStart(2,'0')}</span> — ${title}`);
+
+                try {
+                    const episodeRes = await fetch(
+                        `/library/metadata/${episode.guid.replace('tvdb://','')}/children?X-Plex-Container-Size=0&X-Plex-Token=${encodeURIComponent(plexToken)}`,
+                        { headers: { 'X-Plex-Token': plexToken } }
+                    );
+                    const epData = await episodeRes.json();
+
+                    // Check for markers
+                    const markers = epData.MediaContainer.Metadata?.[0]?.marker || [];
+                    const introMarker = markers.find(m => m.type === 'intro');
+
+                    if (!introMarker || !introMarker.start || !introMarker.end) {
+                        appendLog('skipped', `No intro markers found <span class="detail">(markers: ${markers.length})</span>`);
+                        state.stats.skipped++;
+                        processed++;
+                        updateProgress(processed, state.stats.total, (processed / state.stats.total) * 100);
+                        continue;
+                    }
+
+                    const introStart = (introMarker.start / 1000).toFixed(1);
+                    const introEnd = (introMarker.end / 1000).toFixed(1);
+
+                    // Extract TVDB ID
+                    const tvdbId = episode.guid.match(/tvdb:\/\/(\d+)/)?.[1];
+                    if (!tvdbId) {
+                        appendLog('failed', `No TVDB ID found <span class="detail">(guid: ${episode.guid})</span>`);
+                        state.stats.failed++;
+                    } else {
+                        // Translate to TMDB
+                        const tmdbRes = await fetch(
+                            `https://api.themoviedb.org/3/find/${tvdbId}?external_source=tvdb_id&api_key=${tmdbKey}`
+                        );
+                        const tmdbData = await tmdbRes.json();
+
+                        const tvShow = tmdbData.tv_shows?.[0];
+                        if (!tvShow) {
+                            appendLog('failed', `No TMDB match for TVDB ID ${tvdbId}`);
+                            state.stats.failed++;
+                        } else {
+                            const tmdbId = tvShow.id;
+                            const tmdbSeason = season;
+                            const tmdbEpisode = number;
+
+                            if (dryRun) {
+                                appendLog('matched', `<span class="intro-time">${introStart}s - ${introEnd}s</span> → TMDB ${tmdbId} S${tmdbSeason}E${tmdbEpisode} <span class="detail">(dry run)</span>`);
+                            } else {
+                                // Submit to TheIntroDB
+                                const tidbRes = await fetch('https://api.theintrodb.org/intros', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        'Authorization': `Bearer ${tidbKey}`,
+                                    },
+                                    body: JSON.stringify({
+                                        tmdb_id: tmdbId,
+                                        season: tmdbSeason,
+                                        episode: tmdbEpisode,
+                                        intro_start: introStart,
+                                        intro_end: introEnd,
+                                    }),
+                                });
+
+                                if (tidbRes.ok) {
+                                    appendLog('matched', `<span class="intro-time">${introStart}s - ${introEnd}s</span> → Submitted to TheIntroDB`);
+                                    state.stats.matched++;
+                                } else {
+                                    const errText = await tidbRes.text();
+                                    appendLog('failed', `TIDB API error: ${tidbRes.status} <span class="detail">${errText.slice(0, 100)}</span>`);
+                                    state.stats.failed++;
+                                }
+                            }
+                        }
+                    }
+
+                    processed++;
+                    updateProgress(processed, state.stats.total, (processed / state.stats.total) * 100);
+
+                } catch (epErr) {
+                    appendLog('failed', `Error processing episode: ${epErr.message}`);
+                    state.stats.failed++;
+                    processed++;
+                    updateProgress(processed, state.stats.total, (processed / state.stats.total) * 100);
+                }
+            }
+
+            // All done
+            renderResults(null);
+
+        } catch (err) {
+            appendLog('failed', `Scan error: ${err.message}`);
+        }
+    }
+
+    // ============================================================
+    //  Render Results
+    // ============================================================
+    function renderResults(apiData) {
+        if (apiData) {
+            state.stats = {
+                matched: apiData.results.filter(r => r.status === 'matched').length,
+                skipped: apiData.results.filter(r => r.status === 'skipped').length,
+                failed: apiData.results.filter(r => r.status === 'failed').length,
+                total: apiData.results.length,
+            };
+        }
+
+        el('#sum-total').textContent = state.stats.total;
+        el('#sum-matched').textContent = state.stats.matched;
+        el('#sum-skipped').textContent = state.stats.skipped;
+        el('#sum-failed').textContent = state.stats.failed;
+
+        updateProgress(state.stats.total, state.stats.total, 100);
+
+        // Show summary
+        el('#summary-section').classList.add('visible');
+
+        const statusEl = el('#summary-status');
+       <dyad-write path="backend/static/index.html">
+        const statusEl = el('#summary-status');
+        if (state.stats.failed > 0) {
+            statusEl.className = 'status-msg error';
+            statusEl.textContent = `Completed with ${state.stats.failed} failure(s). Check the log for details.`;
+        } else if (state.stats.matched > 0) {
+            statusEl.className = 'status-msg success';
+            statusEl.textContent = 'Scan completed successfully! All matched episodes were processed.';
+        } else {
+            statusEl.className = 'status-msg info';
+            statusEl.textContent = 'Scan completed. No intros were matched.';
+        }
+    }
+
+    // ============================================================
+    //  Reset
+    // ============================================================
+    function resetApp() {
+        el('#summary-section').classList.remove('visible');
+        el('#progress-section').classList.remove('visible');
+        el('#log-container').innerHTML = '';
+        el('#progress-bar').style.width = '0%';
+        el('#progress-count').textContent = '0 / 0 episodes';
+        el('#progress-percent').textContent = '0%';
+        el('#btn-scan').disabled = false;
+        el('#btn-scan').innerHTML = '🚀 Start Scan';
+        el('#btn-load-libraries').disabled = false;
+    }
+
+    // ============================================================
+    //  Utility
+    // ============================================================
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+    </script>
+</body>
+</html>
