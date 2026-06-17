@@ -179,7 +179,7 @@ async def scan_library_task(
                         continue
                     
                     intro_start = round(intro_marker["start"] / 1000, 1)
-                    intro_end = round(intro_marker["end"] / 1000, 1)
+                    intro_end = round(intro_marker["end / 1000, 1)
                     
                     # Translate TVDB ID to TMDB ID
                     tmdb_resp = await client.get(
@@ -301,6 +301,18 @@ async def serve_index():
     except FileNotFoundError:
         return HTMLResponse(content="<h1>Index not found</h1>", status_code=404)
 
+@app.get("/api/health")
+async def health_check():
+    """Check if the backend is running and ready."""
+    try:
+        return JSONResponse(content={"status": "ok"})
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Service unavailable"}
+        )
+
 @app.get("/api/libraries")
 async def get_libraries(plex_url: str, plex_token: str):
     """Fetch available libraries from Plex."""
@@ -376,7 +388,3 @@ async def get_scan_results(task_id: str):
         log=[LogEntry(**log) for log in task["log"]],
         results=[EpisodeResult(**r) for r in task["results"]]
     )
-
-@app.get("/api/health")
-async def health_check():
-    return {"status": "ok"}
