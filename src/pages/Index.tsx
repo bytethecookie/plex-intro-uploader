@@ -12,8 +12,9 @@ import {
   BookOpen,
   AlertCircle,
   RefreshCw,
+  Save,
+  Server,
 } from 'lucide-react';
-import BackendHeader from '@/components/BackendHeader';
 
 type LogEntry = {
   id: string;
@@ -43,6 +44,8 @@ interface ScanState {
   stats: SummaryStats;
   status: 'idle' | 'running' | 'completed' | 'error';
   errorMessage: string | null;
+  backendConnected: boolean;
+  lastBackendCheck: Date | null;
 }
 
 const Index = () => {
@@ -60,6 +63,8 @@ const Index = () => {
     stats: { total: 0, matched: 0, skipped: 0, failed: 0 },
     status: 'idle',
     errorMessage: null,
+    backendConnected: false,
+    lastBackendCheck: null,
   });
 
   const [libraries, setLibraries] = useState<string[]>([]);
@@ -71,6 +76,33 @@ const Index = () => {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
   }, [state.logs]);
+
+  // Check backend connectivity
+  const checkBackend = async () => {
+    try {
+      const response = await fetch('/api/health');
+      const connected = response.ok;
+      setState(prev => ({ 
+        ...prev, 
+        backendConnected: connected,
+        lastBackendCheck: new Date()
+      }));
+    } catch {
+      setState(prev => ({ 
+        ...prev, 
+        backendConnected: false,
+        lastBackendCheck: new Date()
+      }));
+    }
+  };
+
+  // Initial backend check
+  useEffect(() => {
+    checkBackend();
+    // Check every 5 seconds
+    const interval = setInterval(checkBackend, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleLoadLibraries = async () => {
     // Use default if empty
@@ -132,6 +164,8 @@ const Index = () => {
           tmdb_api_key: state.tmdbKey,
           tidb_api_key: state.tidbKey,
           dry_run: state.dryRun,
+          plex_url: state.plexUrl,
+          plex_token: state.plexToken,
         }),
       });
 
@@ -141,7 +175,7 @@ const Index = () => {
       // Poll for results
       const taskId = result.task_id;
       const pollInterval = setInterval(async () => {
-        const res = await fetch(`/api/scan/results?task_id=${taskId}&plex_url=${state.plexUrl}&plex_token=${state.plexToken}`);
+        const res = await fetch(`/api/scan/results?task_id=${taskId}`);
         const data = await res.json();
         
         setState(prev => ({
@@ -185,6 +219,8 @@ const Index = () => {
       stats: { total: 0, matched: 0, skipped: 0, failed: 0 },
       status: 'idle',
       errorMessage: null,
+      backendConnected: state.backendConnected,
+      lastBackendCheck: state.lastBackendCheck,
     });
     setLibraries([]);
   };
@@ -198,6 +234,11 @@ const Index = () => {
     }
   };
 
+  const formatDateTime = (date: Date | null) => {
+    if (!date) return 'Never';
+    return date.toLocaleTimeString();
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
       <div className="max-w-5xl mx-auto px-4 py-8">
@@ -208,7 +249,33 @@ const Index = () => {
           <p className="text-slate-500">Extract intro markers and submit to TheIntroDB</p>
         </header>
 
-        <BackendHeader />
+        {/* Backend Status */}
+        <div className="mb-6 p-4 bg-white border border-slate-200 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Server className={`w-5 h-5 ${state.backendConnected ? 'text-green-500' : 'text-red-500'}`} />
+              <div>
+                <h3 className="font-semibold text-slate-800">
+                  Backend Status: {state.backendConnected ? 'Active' : 'Inactive'}
+                </h3>
+                <p className="text-sm text-slate-500">
+                  Last checked: {formatDateTime(state.lastBackendCheck)}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={checkBackend}
+              className="px-3 py-1.5 text-sm bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+            >
+              Check Now
+            </button>
+          </div>
+          {state.backendConnected && (
+            <div className="mt-2 text-xs text-slate-400">
+              Using Plex server: <span className="font-mono">{state.plexUrl}</span>
+            </div>
+          )}
+        </div>
 
         {/* Configuration Card */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
@@ -263,7 +330,7 @@ const Index = () => {
                 <input
                   type="password"
                   value={state.tidbKey}
-                  onChange={(e) => setState(prev => ({ ...prev, tidbKey: e.target.value }))}
+                  onChange={(e => setState(prev => ({ ...prev, tidbKey: e.target.value }))}
                   className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   placeholder="tidb_xxxxxxxxxxx"
                 />
