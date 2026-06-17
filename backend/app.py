@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -17,6 +17,14 @@ app = FastAPI(title="Plex Intro Uploader")
 
 # In-memory task store
 tasks = {}
+
+# --- Custom 404 Handler ---
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
 
 # --- Models ---
 
@@ -179,7 +187,7 @@ async def scan_library_task(
                         continue
                     
                     intro_start = round(intro_marker["start"] / 1000, 1)
-                    intro_end = round(intro_marker["end / 1000, 1)
+                    intro_end = round(intro_marker["end"] / 1000, 1)
                     
                     # Translate TVDB ID to TMDB ID
                     tmdb_resp = await client.get(
