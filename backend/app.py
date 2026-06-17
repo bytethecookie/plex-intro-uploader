@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Plex Intro Uploader")
 
+# Log all registered routes on startup
+logger.info("Starting application...")
+for route in app.routes:
+    logger.info(f"  Route: {route.methods} {route.path}")
+
 # In-memory task store
 tasks = {}
 
@@ -65,7 +70,7 @@ class EpisodeResult(BaseModel):
     episode: int
     tvdb_id: str
     tmdb_id: Optional[str] = None
-    intro_start: Optional[float] = None
+    intro_start: Optional[float = None
     intro_end: Optional[float] = None
     status: str
     message: str
@@ -132,7 +137,7 @@ async def scan_library_task(
             
             # Process each episode
             for idx, episode in enumerate(episodes):
-                task["current"] = idx + 1
+                task["current = idx + 1
                 task["percent"] = round(((idx + 1) / task["total"]) * 100)
                 
                 title = episode.get("title", "Unknown")
