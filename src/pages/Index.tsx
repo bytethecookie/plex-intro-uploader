@@ -110,7 +110,10 @@ const Index = () => {
     setState(prev => ({ ...prev, loadingLibraries: true, errorMessage: null, logs: [] }));
     try {
       const endpoint = `${url}/library/sections`;
-      const headers = token ? { 'X-Plex-Token': token } : {};
+      const headers: Record<string, string> = {
+        'Accept': 'application/json',
+        ...(token && { 'X-Plex-Token': token }),
+      };
       const response = await fetch(endpoint, { headers });
       
       if (!response.ok) throw new Error(`Plex API error: ${response.status}`);
@@ -127,7 +130,7 @@ const Index = () => {
         .map((s: any) => s.title) || [];
       
       setLibraries(tvLibraries);
-      if (tvLibaries.length > 0) {
+      if (tvLibraries.length > 0) {
         setState(prev => ({ ...prev, library: tvLibraries[0] }));
       }
     } catch (err: any) {
@@ -265,7 +268,7 @@ const Index = () => {
           </div>
           {state.backendConnected && (
             <div className="mt-2 text-xs text-slate-400">
-              Using Plex server: <span className="font-mono">{state.plexUrl}</span>
+              Using Plex API: <span className="font-mono">{state.plexUrl}</span>
             </div>
           )}
         </div>
