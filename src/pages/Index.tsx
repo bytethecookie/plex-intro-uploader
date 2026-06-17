@@ -187,7 +187,7 @@ const Index = () => {
             total: data.results.length,
             matched: data.results.filter((r: any) => r.status === 'matched').length,
             skipped: data.results.filter((r: any) => r.status === 'skipped').length,
-            failed: data.results.filter((r: any) => r.status === 'failed').length,
+            failed: data.results.filter((r: any => r.status === 'failed').length,
           }
         }));
 
@@ -330,7 +330,7 @@ const Index = () => {
                 <input
                   type="password"
                   value={state.tidbKey}
-                  onChange={(e => setState(prev => ({ ...prev, tidbKey: e.target.value }))}
+                  onChange={(e) => setState(prev => ({ ...prev, tidbKey: e.target.value }))}
                   className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   placeholder="tidb_xxxxxxxxxxx"
                 />
