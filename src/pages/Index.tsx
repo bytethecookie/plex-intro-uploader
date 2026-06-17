@@ -13,6 +13,7 @@ import {
   AlertCircle,
   RefreshCw,
 } from 'lucide-react';
+import BackendHeader from '@/components/BackendHeader';
 
 type LogEntry = {
   id: string;
@@ -199,6 +200,8 @@ const Index = () => {
           <h1 className="text-3xl font-extrabold text-slate-800 mb-2">🎬 Plex Intro Uploader</h1>
           <p className="text-slate-500">Extract intro markers and submit to TheIntroDB</p>
         </header>
+
+        <BackendHeader />
 
         {/* Configuration Card */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
