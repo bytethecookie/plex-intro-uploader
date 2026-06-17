@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Play,
   CheckCircle,
@@ -19,6 +19,7 @@ import {
   EyeOff,
   Settings2,
 } from 'lucide-react';
+import InputField from '@/components/InputField';
 
 type LogEntry = {
   id: string;
@@ -124,7 +125,7 @@ const Index = () => {
   }, [state.logs]);
 
   // Check backend connectivity
-  const checkBackend = async () => {
+  const checkBackend = useCallback(async () => {
     try {
       const response = await fetch('/api/health');
       const connected = response.ok;
@@ -140,7 +141,7 @@ const Index = () => {
         lastBackendCheck: new Date()
       }));
     }
-  };
+  }, []);
 
   // Initial backend check
   useEffect(() => {
@@ -148,9 +149,10 @@ const Index = () => {
     // Check every 5 seconds
     const interval = setInterval(checkBackend, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [checkBackend]);
 
-  const copyToClipboard = async (text: string, key: string) => {
+  const copyToClipboard = useCallback(async (text: string, key: string) => {
+    if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
       setCopiedKey(key);
@@ -158,9 +160,9 @@ const Index = () => {
     } catch {
       // fallback
     }
-  };
+  }, []);
 
-  const handleLoadLibraries = async () => {
+  const handleLoadLibraries = useCallback(async () => {
     const url = state.plexUrl || 'http://localhost:32400';
     const token = state.plexToken || '';
     
@@ -209,9 +211,9 @@ const Index = () => {
     } finally {
       setState(prev => ({ ...prev, loadingLibraries: false }));
     }
-  };
+  }, [state.plexUrl, state.plexToken]);
 
-  const handleStartScan = async () => {
+  const handleStartScan = useCallback(async () => {
     if (!state.library || !state.tmdbKey || !state.tidbKey) {
       setState(prev => ({ ...prev, errorMessage: 'All configuration fields are required.' }));
       return;
@@ -272,9 +274,9 @@ const Index = () => {
     } catch (err: any) {
       setState(prev => ({ ...prev, status: 'error', errorMessage: err.message, scanning: false }));
     }
-  };
+  }, [state.library, state.tmdbKey, state.tidbKey, state.dryRun, state.plexUrl, state.plexToken]);
 
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     setState({
       plexUrl: state.plexUrl || 'http://localhost:32400',
       plexToken: '',
@@ -296,7 +298,15 @@ const Index = () => {
       lastBackendCheck: state.lastBackendCheck,
     });
     setLibraries([]);
-  };
+  }, [state.plexUrl, state.backendConnected, state.lastBackendCheck]);
+
+  const handleChange = useCallback((field: keyof Omit<ScanState, 'logs' | 'stats' | 'status' | 'errorMessage' | 'loadingLibraries' | 'scanning' | 'progress' | 'backendConnected' | 'lastBackendCheck' | 'library'>, value: any) => {
+    setState(prev => ({ ...prev, [field]: value }));
+  }, []);
+
+  const handleToggle = useCallback((field: 'showPlexToken' | 'showTmdbKey' | 'showTidbKey') => {
+    setState(prev => ({ ...prev, [field]: !prev[field] }));
+  }, []);
 
   const getStatusIcon = (status: string) => {
     switch (status) {
@@ -319,64 +329,6 @@ const Index = () => {
       return <span dangerouslySetInnerHTML={{ __html: message }} />;
     }
     return <span>{message}</span>;
-  };
-
-  const InputField = ({
-    label,
-    value,
-    onChange,
-    placeholder,
-    icon: Icon,
-    type = 'text',
-    showToggle = false,
-    copyKey,
-  }: {
-    label: string;
-    value: string;
-    onChange: (val: string) => void;
-    placeholder: string;
-    icon: React.ElementType;
-    type?: string;
-    showToggle?: boolean;
-    copyKey: string;
-  }) => {
-    const isCopied = copiedKey === copyKey;
-    return (
-      <div>
-        <label className="block text-sm font-medium text-slate-600 mb-1">{label}</label>
-        <div className="relative">
-          <Icon className="absolute left-2.5 top-2.5 text-slate-400 w-4 h-4" />
-          <input
-            type={showToggle ? (state[copyKey as keyof ScanState] as boolean) ? 'text' : 'password' : type}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder={placeholder}
-            className="w-full pl-9 pr-20 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
-          />
-          <div className="absolute right-1.5 top-1.5 flex gap-0.5">
-            {showToggle && (
-              <button
-                type="button"
-                onClick={() => {
-                  const toggleKey = copyKey === 'plexToken' ? 'showPlexToken' : copyKey === 'tmdbKey' ? 'showTmdbKey' : 'showTidbKey';
-                  setState(prev => ({ ...prev, [toggleKey]: !prev[toggleKey as keyof ScanState] as boolean }));
-                }}
-                className="p-1.5 text-slate-400 hover:text-slate-600 rounded transition-colors"
-              >
-                {((state[copyKey as keyof ScanState] as boolean) || false) ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => copyToClipboard(value, copyKey)}
-              className="p-1.5 text-slate-400 hover:text-slate-600 rounded transition-colors"
-            >
-              {isCopied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
   };
 
   return (
@@ -428,40 +380,54 @@ const Index = () => {
             <InputField
               label="Plex URL"
               value={state.plexUrl}
-              onChange={(val) => setState(prev => ({ ...prev, plexUrl: val }))}
+              onChange={(val) => handleChange('plexUrl' as any, val)}
               placeholder="http://localhost:32400"
               icon={Globe}
               copyKey="plexUrl"
+              isCopied={copiedKey === 'plexUrl'}
+              onCopy={() => copyToClipboard(state.plexUrl, 'plexUrl')}
             />
             <InputField
               label="Plex Token"
               value={state.plexToken}
-              onChange={(val) => setState(prev => ({ ...prev, plexToken: val }))}
+              onChange={(val) => handleChange('plexToken' as any, val)}
               placeholder="Your Plex API token"
               icon={Key}
               type="password"
               showToggle
+              toggleState={state.showPlexToken}
+              onToggle={() => handleToggle('showPlexToken')}
               copyKey="plexToken"
+              isCopied={copiedKey === 'plexToken'}
+              onCopy={() => copyToClipboard(state.plexToken, 'plexToken')}
             />
             <InputField
               label="TMDB API Key"
               value={state.tmdbKey}
-              onChange={(val) => setState(prev => ({ ...prev, tmdbKey: val }))}
+              onChange={(val) => handleChange('tmdbKey' as any, val)}
               placeholder="tmdb_xxxxxxxxxxx"
               icon={Key}
               type="password"
               showToggle
+              toggleState={state.showTmdbKey}
+              onToggle={() => handleToggle('showTmdbKey')}
               copyKey="tmdbKey"
+              isCopied={copiedKey === 'tmdbKey'}
+              onCopy={() => copyToClipboard(state.tmdbKey, 'tmdbKey')}
             />
             <InputField
               label="TheIntroDB API Key"
               value={state.tidbKey}
-              onChange={(val) => setState(prev => ({ ...prev, tidbKey: val }))}
+              onChange={(val) => handleChange('tidbKey' as any, val)}
               placeholder="tidb_xxxxxxxxxxx"
               icon={Key}
               type="password"
               showToggle
+              toggleState={state.showTidbKey}
+              onToggle={() => handleToggle('showTidbKey')}
               copyKey="tidbKey"
+              isCopied={copiedKey === 'tidbKey'}
+              onCopy={() => copyToClipboard(state.tidbKey, 'tidbKey')}
             />
             <div className="md:col-span-2">
               <label className="block text-sm font-medium text-slate-600 mb-1">Target Library</label>
