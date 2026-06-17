@@ -1,14 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, StreamingResponse, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import httpx
-import os
-import json
-import time
-import uuid
 import asyncio
 import re
+import uuid
+import os
 import logging
 
 # Configure logging
@@ -21,10 +19,6 @@ app = FastAPI(title="Plex Intro Uploader")
 tasks = {}
 
 # --- Models ---
-
-class PlexConfig(BaseModel):
-    plex_url: str
-    plex_token: str
 
 class ScanRequest(BaseModel):
     library_name: str
@@ -162,7 +156,9 @@ async def scan_library_task(
                     ep_details_resp.raise_for_status()
                     ep_details = ep_details_resp.json()
                     
-                    markers = ep_details.get("MediaContainer", {}).get("Metadata", [{}])[0].get("marker", [])
+                    # Defensive parsing: ensure we access the marker list safely
+                    first_metadata = ep_details.get("MediaContainer", {}).get("Metadata", [{}])[0]
+                    markers = first_metadata.get("marker") or []
                     intro_marker = next((m for m in markers if m.get("type") == "intro"), None)
                     
                     if not intro_marker or not intro_marker.get("start") or not intro_marker.get("end"):
@@ -397,33 +393,3 @@ async def get_scan_results(
         log=[LogEntry(**log) for log in task["log"]],
         results=[EpisodeResult(**r) for r in task["results"]]
     )
-
-@app.post("/api/scan/start")
-async def start_scan_with_credentials(request: ScanRequest):
-    """Start scan with full credentials included."""
-    task_id = str(uuid.uuid4())
-    
-    tasks[task_id] = {
-        "status": "running",
-        "current": 0,
-        "total": 0,
-        "percent": 0,
-        "log": [],
-        "results": [],
-        "library_name": request.library_name,
-        "tmdb_api_key": request.tmdb_api_key,
-        "tidb_api_key": request.tidb_api_key,
-        "dry_run": request.dry_run,
-    }
-    
-    asyncio.create_task(scan_library_task(
-        task_id=task_id,
-        plex_url="",  # Will be fetched from /api/scan/results
-        plex_token="",
-        library_name=request.library_name,
-        tmdb_api_key=request.tmdb_api_key,
-        tidb_api_key=request.tidb_api_key,
-        dry_run=request.dry_run
-    ))
-    
-    return ScanResponse(task_id=task_id, message="Scan started")
