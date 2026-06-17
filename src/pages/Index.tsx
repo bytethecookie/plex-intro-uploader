@@ -73,17 +73,24 @@ const Index = () => {
   }, [state.logs]);
 
   const handleLoadLibraries = async () => {
-    if (!state.plexUrl || !state.plexToken) {
-      setState(prev => ({ ...prev, errorMessage: 'Plex URL and Token are required.' }));
-      return;
-    }
+    // Use default if empty
+    const url = state.plexUrl || 'http://localhost:32400';
+    const token = state.plexToken || '';
+    
     setState(prev => ({ ...prev, loadingLibraries: true, errorMessage: null, logs: [] }));
     try {
-      const url = `${state.plexUrl}/library/sections`;
-      const headers = { 'X-Plex-Token': state.plexToken };
-      const response = await fetch(url, { headers });
+      const endpoint = `${url}/library/sections`;
+      const headers = token ? { 'X-Plex-Token': token } : {};
+      const response = await fetch(endpoint, { headers });
       
       if (!response.ok) throw new Error(`Plex API error: ${response.status}`);
+      
+      // Handle non-JSON responses (like XML or HTML errors)
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        throw new Error(`Unexpected response format: ${text.slice(0, 50)}`);
+      }
       
       const data = await response.json();
       const tvLibraries = data.MediaContainer?.Directory
