@@ -127,7 +127,7 @@ const Index = () => {
         .map((s: any) => s.title) || [];
       
       setLibraries(tvLibraries);
-      if (tvLibraries.length > 0) {
+      if (tvLibaries.length > 0) {
         setState(prev => ({ ...prev, library: tvLibraries[0] }));
       }
     } catch (err: any) {
