@@ -13,6 +13,11 @@ import {
   AlertCircle,
   RefreshCw,
   Server,
+  Copy,
+  Check,
+  Eye,
+  EyeOff,
+  Settings2,
 } from 'lucide-react';
 
 type LogEntry = {
@@ -36,6 +41,9 @@ interface ScanState {
   tidbKey: string;
   library: string;
   dryRun: boolean;
+  showPlexToken: boolean;
+  showTmdbKey: boolean;
+  showTidbKey: boolean;
   loadingLibraries: boolean;
   scanning: boolean;
   progress: { current: number; total: number; percent: number };
@@ -47,14 +55,40 @@ interface ScanState {
   lastBackendCheck: Date | null;
 }
 
+const loadConfig = (): Partial<ScanState> => {
+  try {
+    const saved = localStorage.getItem('plex-intro-config');
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+};
+
+const saveConfig = (config: Partial<ScanState>) => {
+  try {
+    const { showPlexToken, showTmdbKey, showTidbKey, lastBackendCheck, ...toSave } = config;
+    localStorage.setItem('plex-intro-config', JSON.stringify(toSave));
+  } catch {
+    // ignore
+  }
+};
+
 const Index = () => {
+  const savedConfig = loadConfig();
+  
   const [state, setState] = useState<ScanState>({
-    plexUrl: 'http://localhost:32400',
-    plexToken: '',
-    tmdbKey: '',
-    tidbKey: '',
-    library: '',
-    dryRun: false,
+    plexUrl: savedConfig.plexUrl || 'http://localhost:32400',
+    plexToken: savedConfig.plexToken || '',
+    tmdbKey: savedConfig.tmdbKey || '',
+    tidbKey: savedConfig.tidbKey || '',
+    library: savedConfig.library || '',
+    dryRun: savedConfig.dryRun ?? false,
+    showPlexToken: false,
+    showTmdbKey: false,
+    showTidbKey: false,
     loadingLibraries: false,
     scanning: false,
     progress: { current: 0, total: 0, percent: 0 },
@@ -67,7 +101,20 @@ const Index = () => {
   });
 
   const [libraries, setLibraries] = useState<string[]>([]);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
+
+  // Save config whenever it changes (excluding UI-only state)
+  useEffect(() => {
+    saveConfig({
+      plexUrl: state.plexUrl,
+      plexToken: state.plexToken,
+      tmdbKey: state.tmdbKey,
+      tidbKey: state.tidbKey,
+      library: state.library,
+      dryRun: state.dryRun,
+    });
+  }, [state.plexUrl, state.plexToken, state.tmdbKey, state.tidbKey, state.library, state.dryRun]);
 
   // Auto-scroll to bottom of logs
   useEffect(() => {
@@ -103,10 +150,25 @@ const Index = () => {
     return () => clearInterval(interval);
   }, []);
 
+  const copyToClipboard = async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null, 1000), 2000);
+    } catch {
+      // fallback
+    }
+  };
+
   const handleLoadLibraries = async () => {
     const url = state.plexUrl || 'http://localhost:32400';
     const token = state.plexToken || '';
     
+    if (!url || !token) {
+      setState(prev => ({ ...prev, errorMessage: 'Please enter both Plex URL and Token.' }));
+      return;
+    }
+
     setState(prev => ({ ...prev, loadingLibraries: true, errorMessage: null, logs: [] }));
     try {
       const endpoint = `${url}/library/sections`;
@@ -116,12 +178,21 @@ const Index = () => {
       };
       const response = await fetch(endpoint, { headers });
       
-      if (!response.ok) throw new Error(`Plex API error: ${response.status}`);
+      if (!response.ok) {
+        // Better error messages based on status code
+        let errorMsg = `Plex API error: ${response.status}`;
+        if (response.status === 401 || response.status === 403) {
+          errorMsg = 'Invalid Plex token. Please check your credentials.';
+        } else if (response.status === 404 || response.status === 503) {
+          errorMsg = 'Plex server is not responding. Check if the server is running and the URL is correct.';
+        }
+        throw new Error(errorMsg);
+      }
       
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         const text = await response.text();
-        throw new Error(`Unexpected response format: ${text.slice(0, 50)}`);
+        throw new Error(`Unexpected response format. Try adding /library/sections to the URL.`);
       }
       
       const data = await response.json();
@@ -153,7 +224,7 @@ const Index = () => {
       logs: [],
       stats: { total: 0, matched: 0, skipped: 0, failed: 0 },
       errorMessage: null,
-    }));
+    });
 
     let pollInterval: any = null;
 
@@ -205,12 +276,15 @@ const Index = () => {
 
   const handleReset = () => {
     setState({
-      plexUrl: 'http://localhost:32400',
+      plexUrl: state.plexUrl || 'http://localhost:32400',
       plexToken: '',
       tmdbKey: '',
       tidbKey: '',
       library: '',
       dryRun: false,
+      showPlexToken: false,
+      showTmdbKey: false,
+      showTidbKey: false,
       loadingLibraries: false,
       scanning: false,
       progress: { current: 0, total: 0, percent: 0 },
@@ -226,8 +300,8 @@ const Index = () => {
 
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case 'matched': return <CheckCircle className="text-green-500" />;
-      case 'skipped': return <AlertCircle className="text-yellow-500" />;
+      case 'matched': return <CheckCircle className="text-emerald-500" />;
+      case 'skipped': return <AlertCircle className="text-amber-500" />;
       case 'failed': return <XCircle className="text-red-500" />;
       default: return <Loader2 className="text-blue-500 animate-spin" />;
     }
@@ -238,105 +312,163 @@ const Index = () => {
     return date.toLocaleTimeString();
   };
 
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
-      <div className="max-w-5xl mx-auto px-4 py-8">
-        <header className="mb-8 text-center">
-          <h1 className="text-3xl font-extrabold text-slate-800 mb-2">🎬 Plex Intro Uploader</h1>
-          <p className="text-slate-500">Extract intro markers and submit to TheIntroDB</p>
-        </header>
+  // Render log messages that contain HTML (from backend)
+  const renderLogMessage = (message: string) => {
+    // If message contains HTML tags, render as HTML
+    if (message.includes('<')) {
+      return <span dangerouslySetInnerHTML={{ __html: message }} />;
+    }
+    return <span>{message}</span>;
+  };
 
-        <div className="mb-6 p-4 bg-white border border-slate-200 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Server className={`w-5 h-5 ${state.backendConnected ? 'text-green-500' : 'text-red-500'}`} />
-              <div>
-                <h3 className="font-semibold text-slate-800">
-                  Backend Status: {state.backendConnected ? 'Active' : 'Inactive'}
-                </h3>
-                <p className="text-sm text-slate-500">
-                  Last checked: {formatDateTime(state.lastBackendCheck)}
-                </p>
-              </div>
-            </div>
+  const InputField = ({
+    label,
+    value,
+    onChange,
+    placeholder,
+    icon: Icon,
+    type = 'text',
+    showToggle = false,
+    copyKey,
+  }: {
+    label: string;
+    value: string;
+    onChange: (val: string) => void;
+    placeholder: string;
+    icon: React.ElementType;
+    type?: string;
+    showToggle?: boolean;
+    copyKey: string;
+  }) => {
+    const isCopied = copiedKey === copyKey;
+    return (
+      <div>
+        <label className="block text-sm font-medium text-slate-600 mb-1">{label}</label>
+        <div className="relative">
+          <Icon className="absolute left-2.5 top-2.5 text-slate-400 w-4 h-4" />
+          <input
+            type={showToggle ? (state[copyKey as keyof ScanState] as boolean) ? 'text' : 'password' : type}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+            className="w-full pl-9 pr-20 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+          />
+          <div className="absolute right-1.5 top-1.5 flex gap-0.5">
+            {showToggle && (
+              <button
+                type="button"
+                onClick={() => {
+                  const toggleKey = copyKey === 'plexToken' ? 'showPlexToken' : copyKey === 'tmdbKey' ? 'showTmdbKey' : 'showTidbKey';
+                  setState(prev => ({ ...prev, [toggleKey]: !prev[toggleKey as keyof ScanState] as boolean }));
+                }}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded transition-colors"
+              >
+                {((state[copyKey as keyof ScanState] as boolean) || false) ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            )}
             <button
-              onClick={checkBackend}
-              className="px-3 py-1.5 text-sm bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+              type="button"
+              onClick={() => copyToClipboard(value, copyKey)}
+              className="p-1.5 text-slate-400 hover:text-slate-600 rounded transition-colors"
             >
-              Check Now
+              {isCopied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
           </div>
-          {state.backendConnected && (
-            <div className="mt-2 text-xs text-slate-400">
-              Using Plex API: <span className="font-mono">{state.plexUrl}</span>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 text-slate-900 font-sans">
+      {/* Header */}
+      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white">
+        <div className="max-w-5xl mx-auto px-4 py-8">
+          <div className="flex items-center gap-3 mb-2">
+            <Settings2 className="w-6 h-6" />
+            <h1 className="text-2xl font-bold">🎬 Plex Intro Uploader</h1>
+          </div>
+          <p className="text-blue-100 text-sm">Extract intro markers from your Plex library and submit them to TheIntroDB</p>
+        </div>
+      </div>
+
+      <div className="max-w-5xl mx-auto px-4 py-6">
+        {/* Backend Status */}
+        <div className="mb-6">
+          <div className="p-4 bg-white/80 backdrop-blur-sm border border-slate-200 rounded-xl shadow-sm">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className={`w-2.5 h-2.5 rounded-full ${state.backendConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+                <div>
+                  <h3 className="font-semibold text-slate-700">
+                    Backend {state.backendConnected ? 'Connected' : 'Disconnected'}
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Last check: {formatDateTime(state.lastBackendCheck)}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={checkBackend}
+                className="px-3 py-1.5 text-sm bg-slate-100 hover:bg-slate-200 rounded-md transition-colors text-slate-600"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
             </div>
-          )}
+          </div>
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
-          <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-            <Database className="text-blue-500" />
+        {/* Configuration Card */}
+        <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
+          <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800">
+            <Database className="text-blue-500 w-5 h-5" />
             Configuration
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">Plex URL</label>
-              <div className="relative">
-                <Globe className="absolute left-2 top-2.5 text-slate-400 w-5 h-5" />
-                <input
-                  type="url"
-                  value={state.plexUrl}
-                  onChange={(e) => setState(prev => ({ ...prev, plexUrl: e.target.value }))}
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="http://192.168.1.100:32400"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">Plex Token</label>
-              <div className="relative">
-                <Key className="absolute left-2 top-2.5 text-slate-400 w-5 h-5" />
-                <input
-                  type="password"
-                  value={state.plexToken}
-                  onChange={(e) => setState(prev => ({ ...prev, plexToken: e.target.value }))}
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Your Plex API token"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">TMDB API Key</label>
-              <div className="relative">
-                <Key className="absolute left-2 top-2.5 text-slate-400 w-5 h-5" />
-                <input
-                  type="password"
-                  value={state.tmdbKey}
-                  onChange={(e) => setState(prev => ({ ...prev, tmdbKey: e.target.value }))}
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="tmdb_xxxxxxxxxxx"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">TheIntroDB API Key</label>
-              <div className="relative">
-                <Key className="absolute left-2 top-2.5 text-slate-400 w-5 h-5" />
-                <input
-                  type="password"
-                  value={state.tidbKey}
-                  onChange={(e) => setState(prev => ({ ...prev, tidbKey: e.target.value }))}
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="tidb_xxxxxxxxxxx"
-                />
-              </div>
-            </div>
+            <InputField
+              label="Plex URL"
+              value={state.plexUrl}
+              onChange={(val) => setState(prev => ({ ...prev, plexUrl: val }))}
+              placeholder="http://localhost:32400"
+              icon={Globe}
+              copyKey="plexUrl"
+            />
+            <InputField
+              label="Plex Token"
+              value={state.plexToken}
+              onChange={(val) => setState(prev => ({ ...prev, plexToken: val }))}
+              placeholder="Your Plex API token"
+              icon={Key}
+              type="password"
+              showToggle
+              copyKey="plexToken"
+            />
+            <InputField
+              label="TMDB API Key"
+              value={state.tmdbKey}
+              onChange={(val) => setState(prev => ({ ...prev, tmdbKey: val }))}
+              placeholder="tmdb_xxxxxxxxxxx"
+              icon={Key}
+              type="password"
+              showToggle
+              copyKey="tmdbKey"
+            />
+            <InputField
+              label="TheIntroDB API Key"
+              value={state.tidbKey}
+              onChange={(val => setState(prev => ({ ...prev, tidbKey: val }))}
+              placeholder="tidb_xxxxxxxxxxx"
+              icon={Key}
+              type="password"
+              showToggle
+              copyKey="tidbKey"
+            />
             <div className="md:col-span-2">
               <label className="block text-sm font-medium text-slate-600 mb-1">Target Library</label>
               <select
                 value={state.library}
                 onChange={(e) => setState(prev => ({ ...prev, library: e.target.value }))}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
               >
                 <option value="">-- Select a library first --</option>
                 {libraries.map((lib) => (
@@ -350,7 +482,7 @@ const Index = () => {
                 id="dry-run"
                 checked={state.dryRun}
                 onChange={(e) => setState(prev => ({ ...prev, dryRun: e.target.checked }))}
-                className="w-4 h-4 text-blue-600 rounded"
+                className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500"
               />
               <label htmlFor="dry-run" className="text-sm text-slate-600">
                 Dry run (preview without submitting to TheIntroDB)
@@ -361,106 +493,110 @@ const Index = () => {
             <button
               onClick={handleLoadLibraries}
               disabled={state.loadingLibraries || state.scanning}
-              className="px-4 py-2 bg-white border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              className="px-4 py-2.5 bg-white border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all"
             >
-              {state.loadingLibraries ? <Loader2 className="animate-spin" /> : <BookOpen />}
+              {state.loadingLibraries ? <Loader2 className="animate-spin w-4 h-4" /> : <BookOpen className="w-4 h-4" />}
               {state.loadingLibraries ? 'Loading...' : 'Load Libraries'}
             </button>
             <button
               onClick={handleStartScan}
               disabled={!state.library || state.scanning || state.loadingLibraries}
-              className="flex-1 px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              className="flex-1 px-4 py-2.5 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
             >
-              {state.scanning ? <Loader2 className="animate-spin" /> : <Play />}
+              {state.scanning ? <Loader2 className="animate-spin w-4 h-4" /> : <Play className="w-4 h-4" />}
               {state.scanning ? 'Scanning...' : 'Start Scan'}
             </button>
           </div>
           {state.errorMessage && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              {state.errorMessage}
+            <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg flex items-center gap-2 animate-in">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span className="text-sm">{state.errorMessage}</span>
             </div>
           )}
         </div>
 
+        {/* Progress Section */}
         {(state.scanning || state.status === 'running' || state.logs.length > 0) && (
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-              <Loader2 className="text-blue-500 animate-spin" />
+          <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-slate-800">
+              {state.scanning ? <Loader2 className="text-blue-500 animate-spin w-5 h-5" /> : <CheckCircle className="text-green-500 w-5 h-5" />}
               Scan Progress
             </h2>
-            <div className="mb-4">
-              <div className="w-full bg-slate-200 rounded-full h-2 mb-1">
-                <div 
-                  className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
-                  style={{ width: `${state.progress.percent}%` }}
-                ></div>
+            {state.status === 'running' && (
+              <div className="mb-4">
+                <div className="w-full bg-slate-100 rounded-full h-2 mb-1.5">
+                  <div 
+                    className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+                    style={{ width: `${Math.max(state.progress.percent, 0.1)}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-slate-400">
+                  <span>{state.progress.current} / {state.progress.total} episodes</span>
+                  <span>{Math.round(state.progress.percent)}%</span>
+                </div>
               </div>
-              <div className="flex justify-between text-sm text-slate-500">
-                <span>{state.progress.current} / {state.progress.total} episodes</span>
-                <span>{Math.round(state.progress.percent)}%</span>
-              </div>
-            </div>
+            )}
             <div 
               ref={logContainerRef}
-              className="bg-slate-900 text-slate-100 rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm space-y-1"
+              className="bg-slate-900 text-slate-100 rounded-lg p-4 h-64 overflow-y-auto font-mono text-xs space-y-1.5 scrollbar-thin"
             >
-              {state.logs.map((log, index) => (
-                <div key={log.id || index} className="flex gap-2">
-                  <div className="min-w-[40px] flex items-center">{getStatusIcon(log.status)}</div>
-                  <div className="flex-1">
-                    <span className="text-slate-400 text-xs">{log.timestamp}</span>
-                    <p dangerouslySetInnerHTML={{ __html: log.message }} />
-                  </div>
-                </div>
-              ))}
-              {state.logs.length === 0 && (
+              {state.logs.length === 0 && state.status === 'running' ? (
                 <div className="text-slate-500 italic">Waiting for scan results...</div>
+              ) : (
+                state.logs.map((log, index) => (
+                  <div key={log.id || index} className="flex gap-2.5">
+                    <div className="mt-1.5 min-w-[16px]">{getStatusIcon(log.status)}</div>
+                    <div className="flex-1">
+                      {renderLogMessage(log.message)}
+                    </div>
+                  </div>
+                ))
               )}
             </div>
           </div>
         )}
 
+        {/* Summary */}
         {state.status === 'completed' && (
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-            <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-              <CheckCircle className="text-green-500" />
+          <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6">
+            <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800">
+              <CheckCircle className="text-green-500 w-5 h-5" />
               Scan Summary
             </h2>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-              <div className="p-4 bg-slate-50 rounded-lg text-center">
-                <div className="text-2xl font-bold text-slate-800">{state.stats.total}</div>
-                <div className="text-sm text-slate-500">Total</div>
+              <div className="p-4 bg-slate-50 rounded-xl text-center">
+                <div className="text-2xl font-bold text-slate-700">{state.stats.total}</div>
+                <div className="text-xs text-slate-400 mt-1">Total Episodes</div>
               </div>
-              <div className="p-4 bg-green-50 rounded-lg text-center">
-                <div className="text-2xl font-bold text-green-600">{state.stats.matched}</div>
-                <div className="text-sm text-green-600">Matched</div>
+              <div className="p-4 bg-emerald-50 rounded-xl text-center">
+                <div className="text-2xl font-bold text-emerald-600">{state.stats.matched}</div>
+                <div className="text-xs text-emerald-500 mt-1">Matched</div>
               </div>
-              <div className="p-4 bg-yellow-50 rounded-lg text-center">
-                <div className="text-2xl font-bold text-yellow-600">{state.stats.skipped}</div>
-                <div className="text-sm text-yellow-600">Skipped</div>
+              <div className="p-4 bg-amber-50 rounded-xl text-center">
+                <div className="text-2xl font-bold text-amber-600">{state.stats.skipped}</div>
+                <div className="text-xs text-amber-500 mt-1">Skipped</div>
               </div>
-              <div className="p-4 bg-red-50 rounded-lg text-center">
+              <div className="p-4 bg-red-50 rounded-xl text-center">
                 <div className="text-2xl font-bold text-red-600">{state.stats.failed}</div>
-                <div className="text-sm text-red-600">Failed</div>
+                <div className="text-xs text-red-500 mt-1">Failed</div>
               </div>
             </div>
             <button
               onClick={handleReset}
-              className="w-full px-4 py-2 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 flex items-center justify-center gap-2"
+              className="w-full px-4 py-2.5 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 flex items-center justify-center gap-2 transition-all"
             >
-              <RefreshCw />
+              <RefreshCw className="w-4 h-4" />
               Start New Scan
             </button>
           </div>
         )}
 
-        <footer className="mt-8 text-center text-sm text-slate-400">
+        <footer className="mt-8 text-center text-xs text-slate-400 pb-6">
           <p>Plex Intro Uploader — Powered by FastAPI & TheIntroDB</p>
           <p className="mt-1">
-            <a href="https://theintrodb.org" className="hover:text-blue-500">TheIntroDB</a> ·
-            <a href="https://www.plex.tv" className="hover:text-blue-500">Plex</a> ·
-            <a href="https://www.themoviedb.org" className="hover:text-blue-500">TMDB</a>
+            <a href="https://theintrodb.org" className="hover:text-blue-500 transition-colors">TheIntroDB</a> ·
+            <a href="https://www.plex.tv" className="hover:text-blue-500 transition-colors">Plex</a> ·
+            <a href="https://www.themoviedb.org" className="hover:text-blue-500 transition-colors">TMDB</a>
           </p>
         </footer>
       </div>
