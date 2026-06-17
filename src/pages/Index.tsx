@@ -218,6 +218,13 @@ const Index = () => {
       setState(prev => ({ ...prev, errorMessage: 'All configuration fields are required.' }));
       return;
     }
+
+    // Check backend connection before starting
+    if (!state.backendConnected) {
+      setState(prev => ({ ...prev, errorMessage: 'Backend is not connected. Please ensure the Python app is running.' }));
+      return;
+    }
+
     setState(prev => ({ 
       ...prev, 
       scanning: true, 
@@ -274,7 +281,7 @@ const Index = () => {
     } catch (err: any) {
       setState(prev => ({ ...prev, status: 'error', errorMessage: err.message, scanning: false }));
     }
-  }, [state.library, state.tmdbKey, state.tidbKey, state.dryRun, state.plexUrl, state.plexToken]);
+  }, [state.library, state.tmdbKey, state.tidbKey, state.dryRun, state.plexUrl, state.plexToken, state.backendConnected]);
 
   const handleReset = useCallback(() => {
     setState({
@@ -466,7 +473,7 @@ const Index = () => {
             </button>
             <button
               onClick={handleStartScan}
-              disabled={!state.library || state.scanning || state.loadingLibraries}
+              disabled={!state.library || state.scanning || state.loadingLibraries || !state.backendConnected}
               className="flex-1 px-4 py-2.5 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
             >
               {state.scanning ? <Loader2 className="animate-spin w-4 h-4" /> : <Play className="w-4 h-4" />}
