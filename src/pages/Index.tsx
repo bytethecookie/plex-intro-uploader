@@ -187,7 +187,7 @@ const Index = () => {
             total: data.results.length,
             matched: data.results.filter((r: any) => r.status === 'matched').length,
             skipped: data.results.filter((r: any) => r.status === 'skipped').length,
-            failed: data.results.filter((r: any => r.status === 'failed').length,
+            failed: data.results.filter((r: any) => r.status === 'failed').length,
           }
         }));
 
