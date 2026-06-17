@@ -152,6 +152,8 @@ const Index = () => {
       errorMessage: null,
     }));
 
+    let pollInterval: any = null;
+
     try {
       const response = await fetch('/api/scan', {
         method: 'POST',
@@ -170,7 +172,8 @@ const Index = () => {
       if (!response.ok) throw new Error(result.detail || 'Scan start failed');
       
       const taskId = result.task_id;
-      const pollInterval = setInterval(async () => {
+      
+      pollInterval = setInterval(async () => {
         const res = await fetch(`/api/scan/results?task_id=${taskId}`);
         const data = await res.json();
         
@@ -191,8 +194,6 @@ const Index = () => {
           clearInterval(pollInterval);
         }
       }, 1000);
-
-      return () => clearInterval(pollInterval);
 
     } catch (err: any) {
       setState(prev => ({ ...prev, status: 'error', errorMessage: err.message, scanning: false }));
