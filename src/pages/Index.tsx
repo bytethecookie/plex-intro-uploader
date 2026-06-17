@@ -12,7 +12,6 @@ import {
   BookOpen,
   AlertCircle,
   RefreshCw,
-  Copy
 } from 'lucide-react';
 
 type LogEntry = {
