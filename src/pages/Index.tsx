@@ -154,7 +154,7 @@ const Index = () => {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedKey(key);
-      setTimeout(() => setCopiedKey(null, 1000), 2000);
+      setTimeout(() => setCopiedKey(null), 2000);
     } catch {
       // fallback
     }
@@ -224,7 +224,7 @@ const Index = () => {
       logs: [],
       stats: { total: 0, matched: 0, skipped: 0, failed: 0 },
       errorMessage: null,
-    });
+    }));
 
     let pollInterval: any = null;
 
@@ -456,7 +456,7 @@ const Index = () => {
             <InputField
               label="TheIntroDB API Key"
               value={state.tidbKey}
-              onChange={(val => setState(prev => ({ ...prev, tidbKey: val }))}
+              onChange={(val) => setState(prev => ({ ...prev, tidbKey: val }))}
               placeholder="tidb_xxxxxxxxxxx"
               icon={Key}
               type="password"
