@@ -12,7 +12,6 @@ import {
   BookOpen,
   AlertCircle,
   RefreshCw,
-  Save,
   Server,
 } from 'lucide-react';
 
@@ -105,7 +104,6 @@ const Index = () => {
   }, []);
 
   const handleLoadLibraries = async () => {
-    // Use default if empty
     const url = state.plexUrl || 'http://localhost:32400';
     const token = state.plexToken || '';
     
@@ -117,7 +115,6 @@ const Index = () => {
       
       if (!response.ok) throw new Error(`Plex API error: ${response.status}`);
       
-      // Handle non-JSON responses (like XML or HTML errors)
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         const text = await response.text();
@@ -172,7 +169,6 @@ const Index = () => {
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || 'Scan start failed');
       
-      // Poll for results
       const taskId = result.task_id;
       const pollInterval = setInterval(async () => {
         const res = await fetch(`/api/scan/results?task_id=${taskId}`);
@@ -196,7 +192,6 @@ const Index = () => {
         }
       }, 1000);
 
-      // Clean up interval on unmount or state change (simplified here)
       return () => clearInterval(pollInterval);
 
     } catch (err: any) {
@@ -242,14 +237,11 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
       <div className="max-w-5xl mx-auto px-4 py-8">
-        
-        {/* Header */}
         <header className="mb-8 text-center">
           <h1 className="text-3xl font-extrabold text-slate-800 mb-2">🎬 Plex Intro Uploader</h1>
           <p className="text-slate-500">Extract intro markers and submit to TheIntroDB</p>
         </header>
 
-        {/* Backend Status */}
         <div className="mb-6 p-4 bg-white border border-slate-200 rounded-lg">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -277,7 +269,6 @@ const Index = () => {
           )}
         </div>
 
-        {/* Configuration Card */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
             <Database className="text-blue-500" />
@@ -388,7 +379,6 @@ const Index = () => {
           )}
         </div>
 
-        {/* Progress Section */}
         {(state.scanning || state.status === 'running' || state.logs.length > 0) && (
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
@@ -427,7 +417,6 @@ const Index = () => {
           </div>
         )}
 
-        {/* Summary Section */}
         {state.status === 'completed' && (
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
             <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
