@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 import httpx
 import asyncio
@@ -25,6 +25,8 @@ class ScanRequest(BaseModel):
     tmdb_api_key: str
     tidb_api_key: str
     dry_run: bool = False
+    plex_url: str = ""
+    plex_token: str = ""
 
 class ScanResponse(BaseModel):
     task_id: str
@@ -333,13 +335,19 @@ async def start_scan(request: ScanRequest):
         "percent": 0,
         "log": [],
         "results": [],
+        "plex_url": request.plex_url,
+        "plex_token": request.plex_token,
+        "library_name": request.library_name,
+        "tmdb_api_key": request.tmdb_api_key,
+        "tidb_api_key": request.tidb_api_key,
+        "dry_run": request.dry_run,
     }
     
     # Start background task
     asyncio.create_task(scan_library_task(
         task_id=task_id,
-        plex_url="",  # Will be fetched from /api/scan/results
-        plex_token="",
+        plex_url=request.plex_url or "http://localhost:32400",
+        plex_token=request.plex_token or "",
         library_name=request.library_name,
         tmdb_api_key=request.tmdb_api_key,
         tidb_api_key=request.tidb_api_key,
@@ -349,37 +357,12 @@ async def start_scan(request: ScanRequest):
     return ScanResponse(task_id=task_id, message="Scan started")
 
 @app.get("/api/scan/results")
-async def get_scan_results(
-    task_id: str,
-    plex_url: str = "",
-    plex_token: str = ""
-):
+async def get_scan_results(task_id: str):
     """Get scan progress and results via polling."""
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     
     task = tasks[task_id]
-    
-    # If task is pending/running but we have plex credentials, start the actual scan
-    if task["status"] in ("pending", "running") and plex_url and plex_token:
-        # Re-create the task with full credentials
-        existing = tasks.pop(task_id)
-        task["status"] = "running"
-        task["current"] = 0
-        task["total"] = 0
-        task["percent"] = 0
-        task["log"] = []
-        task["results"] = []
-        
-        asyncio.create_task(scan_library_task(
-            task_id=task_id,
-            plex_url=plex_url,
-            plex_token=plex_token,
-            library_name=task.get("library_name", ""),
-            tmdb_api_key=task.get("tmdb_api_key", ""),
-            tidb_api_key=task.get("tidb_api_key", ""),
-            dry_run=task.get("dry_run", False)
-        ))
     
     progress = ScanProgress(
         current=task["current"],
@@ -393,3 +376,7 @@ async def get_scan_results(
         log=[LogEntry(**log) for log in task["log"]],
         results=[EpisodeResult(**r) for r in task["results"]]
     )
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
