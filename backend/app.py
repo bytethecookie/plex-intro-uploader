@@ -21,9 +21,19 @@ tasks = {}
 # --- Custom 404 Handler ---
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.info(f"HTTPException: status={exc.status_code}, detail={exc.detail}")
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail}
+    )
+
+# Catch-all 404 handler
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: Exception):
+    logger.info(f"404: {request.method} {request.url}")
+    return JSONResponse(
+        status_code=404,
+        content={"detail": "Not found"}
     )
 
 # --- Models ---
@@ -312,6 +322,7 @@ async def serve_index():
 @app.get("/api/health")
 async def health_check():
     """Check if the backend is running and ready."""
+    logger.info("Health check called")
     try:
         return JSONResponse(content={"status": "ok"})
     except Exception as e:
@@ -324,6 +335,7 @@ async def health_check():
 @app.get("/api/libraries")
 async def get_libraries(plex_url: str, plex_token: str):
     """Fetch available libraries from Plex."""
+    logger.info(f"Libraries called with plex_url={plex_url}")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
@@ -346,6 +358,7 @@ async def get_libraries(plex_url: str, plex_token: str):
 @app.post("/api/scan", response_model=ScanResponse)
 async def start_scan(request: ScanRequest):
     """Start scanning episodes from a Plex library."""
+    logger.info(f"Scan called with library_name={request.library_name}, tmdb_key={request.tmdb_api_key}, tidb_key={request.tidb_api_key}, dry_run={request.dry_run}")
     task_id = str(uuid.uuid4())
     
     tasks[task_id] = {
@@ -379,6 +392,7 @@ async def start_scan(request: ScanRequest):
 @app.get("/api/scan/results")
 async def get_scan_results(task_id: str):
     """Get scan progress and results via polling."""
+    logger.info(f"Scan results called with task_id={task_id}")
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     
