@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+from typing import Optional, List
 import httpx
 import asyncio
 import re
@@ -21,7 +22,6 @@ tasks = {}
 # --- Custom 404 Handler ---
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    logger.info(f"HTTPException: status={exc.status_code}, detail={exc.detail}")
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail}
@@ -64,17 +64,17 @@ class EpisodeResult(BaseModel):
     season: int
     episode: int
     tvdb_id: str
-    tmdb_id: str | None = None
-    intro_start: float | None = None
-    intro_end: float | None = None
+    tmdb_id: Optional[str] = None
+    intro_start: Optional[float] = None
+    intro_end: Optional[float] = None
     status: str
     message: str
 
 class ScanStatus(BaseModel):
     status: str
     progress: ScanProgress
-    log: list[LogEntry] = []
-    results: list[EpisodeResult] = []
+    log: List[LogEntry] = []
+    results: List[EpisodeResult] = []
 
 # --- Async Background Task ---
 
