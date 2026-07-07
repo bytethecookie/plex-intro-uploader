@@ -2,573 +2,794 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
-  Play,
-  CheckCircle,
-  XCircle,
-  Loader2,
-  Globe,
-  Key,
-  Database,
-  BookOpen,
-  AlertCircle,
-  RefreshCw,
-  Server,
-  Copy,
-  Check,
-  Eye,
-  EyeOff,
-  Settings2,
+  Play, CheckCircle, XCircle, Loader2, Globe, Key, Database, BookOpen,
+  AlertCircle, RefreshCw, Upload, Settings2, ChevronDown, ChevronRight,
+  AlertTriangle, RotateCcw,
 } from 'lucide-react';
 import InputField from '@/components/InputField';
 
-type LogEntry = {
-  id: string;
-  status: 'pending' | 'matched' | 'skipped' | 'failed';
+// --- Types ---
+
+type LogEntry = { status: string; message: string };
+
+type EpisodeResult = {
+  show_title?: string;
+  title: string;
+  season: number;
+  episode: number;
+  tvdb_id: string;
+  imdb_id?: string;
+  intro_start?: number;
+  intro_end?: number;
+  start_ms?: number;
+  end_ms?: number;
+  status: 'matched' | 'skipped' | 'failed';
   message: string;
-  timestamp: string;
 };
 
-type SummaryStats = {
-  total: number;
-  matched: number;
-  skipped: number;
-  failed: number;
+type SubmitResult = {
+  title: string;
+  season: number;
+  episode: number;
+  // submitted | rejected | rate_limited | error
+  status: string;
+  message: string;
+  http_status?: number;
 };
 
-interface ScanState {
-  plexUrl: string;
-  plexToken: string;
-  tmdbKey: string;
-  tidbKey: string;
-  library: string;
-  dryRun: boolean;
-  showPlexToken: boolean;
-  showTmdbKey: boolean;
-  showTidbKey: boolean;
-  loadingLibraries: boolean;
-  scanning: boolean;
-  progress: { current: number; total: number; percent: number };
-  logs: LogEntry[];
-  stats: SummaryStats;
-  status: 'idle' | 'running' | 'completed' | 'error';
-  errorMessage: string | null;
-  backendConnected: boolean;
-  lastBackendCheck: Date | null;
-}
+// --- Indeterminate checkbox ---
 
-const loadConfig = (): Partial<ScanState> => {
-  try {
-    const saved = localStorage.getItem('plex-intro-config');
-    if (saved) {
-      return JSON.parse(saved);
-    }
-  } catch {
-    // ignore
-  }
-  return {};
+const IndeterminateCheckbox = ({
+  checked, indeterminate, onChange, className = '',
+}: {
+  checked: boolean; indeterminate: boolean; onChange: () => void; className?: string;
+}) => {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (ref.current) ref.current.indeterminate = indeterminate && !checked; }, [indeterminate, checked]);
+  return (
+    <input ref={ref} type="checkbox" checked={checked} onChange={onChange}
+      onClick={e => e.stopPropagation()}
+      className={`w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 ${className}`} />
+  );
 };
 
-const saveConfig = (config: Partial<ScanState>) => {
-  try {
-    const { showPlexToken, showTmdbKey, showTidbKey, lastBackendCheck, ...toSave } = config;
-    localStorage.setItem('plex-intro-config', JSON.stringify(toSave));
-  } catch {
-    // ignore
-  }
+// --- Submit status chip ---
+
+const StatusChip = ({ status }: { status: string }) => {
+  const cfg: Record<string, { cls: string; icon: React.ReactNode; label: string }> = {
+    submitted:    { cls: 'bg-emerald-100 text-emerald-700', icon: <CheckCircle className="w-3 h-3" />, label: 'Submitted' },
+    rejected:     { cls: 'bg-red-100 text-red-700',         icon: <XCircle className="w-3 h-3" />,     label: 'Rejected' },
+    rate_limited: { cls: 'bg-amber-100 text-amber-700',     icon: <AlertTriangle className="w-3 h-3" />, label: 'Rate limited' },
+    error:        { cls: 'bg-slate-100 text-slate-600',     icon: <XCircle className="w-3 h-3" />,     label: 'Error' },
+  };
+  const c = cfg[status] ?? cfg.error;
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${c.cls}`}>
+      {c.icon}{c.label}
+    </span>
+  );
 };
+
+// --- Persistence ---
+
+const CONFIG_KEY = 'plex-intro-config';
+const loadLocalConfig = () => { try { const s = localStorage.getItem(CONFIG_KEY); return s ? JSON.parse(s) : {}; } catch { return {}; } };
+const saveLocalConfig = (cfg: Record<string, unknown>) => { try { localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg)); } catch { /* */ } };
+
+// --- Main component ---
 
 const Index = () => {
-  const savedConfig = loadConfig();
-  
-  const [state, setState] = useState<ScanState>({
-    plexUrl: savedConfig.plexUrl || 'http://localhost:32400',
-    plexToken: savedConfig.plexToken || '',
-    tmdbKey: savedConfig.tmdbKey || '',
-    tidbKey: savedConfig.tidbKey || '',
-    library: savedConfig.library || '',
-    dryRun: savedConfig.dryRun ?? false,
-    showPlexToken: false,
-    showTmdbKey: false,
-    showTidbKey: false,
-    loadingLibraries: false,
-    scanning: false,
-    progress: { current: 0, total: 0, percent: 0 },
-    logs: [],
-    stats: { total: 0, matched: 0, skipped: 0, failed: 0 },
-    status: 'idle',
-    errorMessage: null,
-    backendConnected: false,
-    lastBackendCheck: null,
-  });
+  const saved = loadLocalConfig();
 
+  // Config — seeded from localStorage, then overwritten by server on mount
+  const [plexUrl, setPlexUrl] = useState<string>(saved.plexUrl || 'http://localhost:32400');
+  const [plexToken, setPlexToken] = useState<string>(saved.plexToken || '');
+  const [tmdbKey, setTmdbKey] = useState<string>(saved.tmdbKey || '');
+  const [introbKey, setIntrobKey] = useState<string>(saved.introbKey || '');
+  const [library, setLibrary] = useState<string>(saved.library || '');
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [libraries, setLibraries] = useState<string[]>([]);
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const logContainerRef = useRef<HTMLDivElement>(null);
 
-  // Save config whenever it changes (excluding UI-only state)
-  useEffect(() => {
-    saveConfig({
-      plexUrl: state.plexUrl,
-      plexToken: state.plexToken,
-      tmdbKey: state.tmdbKey,
-      tidbKey: state.tidbKey,
-      library: state.library,
-      dryRun: state.dryRun,
-    });
-  }, [state.plexUrl, state.plexToken, state.tmdbKey, state.tidbKey, state.library, state.dryRun]);
+  const [showPlexToken, setShowPlexToken] = useState(false);
+  const [showTmdbKey, setShowTmdbKey] = useState(false);
+  const [showIntrobKey, setShowIntrobKey] = useState(false);
 
-  // Auto-scroll to bottom of logs
-  useEffect(() => {
-    if (logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+  // Backend
+  const [backendConnected, setBackendConnected] = useState(false);
+  const [lastCheck, setLastCheck] = useState<Date | null>(null);
+
+  // Scan
+  const [scanStatus, setScanStatus] = useState<'idle' | 'running' | 'completed' | 'error'>('idle');
+  const [progress, setProgress] = useState({ current: 0, total: 0, percent: 0 });
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [results, setResults] = useState<EpisodeResult[]>([]);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [loadingLibraries, setLoadingLibraries] = useState(false);
+
+  // Selection
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [collapsedShows, setCollapsedShows] = useState<Set<string>>(new Set());
+  const [collapsedSeasons, setCollapsedSeasons] = useState<Set<string>>(new Set());
+
+  // Submit
+  const [submitRunning, setSubmitRunning] = useState(false);
+  const [submitDone, setSubmitDone] = useState(false);
+  const [submitProgress, setSubmitProgress] = useState({ current: 0, total: 0, percent: 0 });
+  const [submitResults, setSubmitResults] = useState<SubmitResult[]>([]);
+  // Keep the ordered list of episodes we submitted so we can match back by index for retry
+  const [submittedEpisodes, setSubmittedEpisodes] = useState<EpisodeResult[]>([]);
+
+  const logRef = useRef<HTMLDivElement>(null);
+
+  // --- Derived ---
+
+  const matchedResults = useMemo(() => results.filter(r => r.status === 'matched'), [results]);
+  const resultKey = (r: EpisodeResult) => `${r.imdb_id}_S${r.season}E${r.episode}`;
+
+  const groupedResults = useMemo(() => {
+    const map: Record<string, Record<number, EpisodeResult[]>> = {};
+    for (const ep of matchedResults) {
+      const show = ep.show_title || 'Unknown Show';
+      if (!map[show]) map[show] = {};
+      if (!map[show][ep.season]) map[show][ep.season] = [];
+      map[show][ep.season].push(ep);
     }
-  }, [state.logs]);
+    return Object.entries(map)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([show, seasons]) => ({
+        show,
+        seasons: Object.entries(seasons)
+          .sort(([a], [b]) => Number(a) - Number(b))
+          .map(([season, eps]) => ({
+            season: Number(season),
+            episodes: [...eps].sort((a, b) => a.episode - b.episode),
+          })),
+      }));
+  }, [matchedResults]);
 
-  // Check backend connectivity
-  const checkBackend = useCallback(async () => {
-    try {
-      const response = await fetch('/api/health');
-      const connected = response.ok;
-      setState(prev => ({ 
-        ...prev, 
-        backendConnected: connected,
-        lastBackendCheck: new Date()
-      }));
-    } catch {
-      setState(prev => ({ 
-        ...prev, 
-        backendConnected: false,
-        lastBackendCheck: new Date()
-      }));
-    }
+  const selectedCount = useMemo(
+    () => matchedResults.filter(r => selectedIds.has(resultKey(r))).length,
+    [matchedResults, selectedIds]
+  );
+  const allSelected = matchedResults.length > 0 && selectedCount === matchedResults.length;
+  const anySelected = selectedCount > 0;
+
+  const getShowEps    = (show: string) => matchedResults.filter(r => (r.show_title || 'Unknown Show') === show);
+  const getSeasonEps  = (show: string, s: number) => matchedResults.filter(r => (r.show_title || 'Unknown Show') === show && r.season === s);
+  const isShowSel     = (show: string) => getShowEps(show).every(r => selectedIds.has(resultKey(r)));
+  const isShowPartial = (show: string) => { const eps = getShowEps(show); return eps.some(r => selectedIds.has(resultKey(r))) && !eps.every(r => selectedIds.has(resultKey(r))); };
+  const isSeasonSel   = (show: string, s: number) => getSeasonEps(show, s).every(r => selectedIds.has(resultKey(r)));
+  const isSeasonPartial = (show: string, s: number) => { const eps = getSeasonEps(show, s); return eps.some(r => selectedIds.has(resultKey(r))) && !eps.every(r => selectedIds.has(resultKey(r))); };
+
+  const stats = useMemo(() => ({
+    total: results.length,
+    matched: matchedResults.length,
+    skipped: results.filter(r => r.status === 'skipped').length,
+    failed: results.filter(r => r.status === 'failed').length,
+  }), [results, matchedResults]);
+
+  const rateLimitedCount  = submitResults.filter(r => r.status === 'rate_limited').length;
+  const rejectedCount     = submitResults.filter(r => r.status === 'rejected').length;
+  const submitErrorCount  = submitResults.filter(r => r.status === 'error').length;
+  const submittedCount    = submitResults.filter(r => r.status === 'submitted').length;
+  const failedSubmitCount = submitResults.filter(r => r.status !== 'submitted').length;
+
+  // --- Persistence ---
+
+  // Load config from server on mount (overwrites localStorage seed)
+  useEffect(() => {
+    fetch('/api/config')
+      .then(r => r.ok ? r.json() : null)
+      .then(cfg => {
+        if (!cfg) return;
+        if (cfg.plexUrl)   setPlexUrl(cfg.plexUrl);
+        if (cfg.plexToken) setPlexToken(cfg.plexToken);
+        if (cfg.tmdbKey)   setTmdbKey(cfg.tmdbKey);
+        if (cfg.introbKey) setIntrobKey(cfg.introbKey);
+        if (cfg.library)   setLibrary(cfg.library);
+      })
+      .catch(() => { /* backend not up yet — localStorage seed is fine */ });
   }, []);
 
-  // Initial backend check
+  // Save to localStorage immediately on any change
+  useEffect(() => {
+    saveLocalConfig({ plexUrl, plexToken, tmdbKey, introbKey, library });
+  }, [plexUrl, plexToken, tmdbKey, introbKey, library]);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
+
+  // --- Backend health ---
+
+  const checkBackend = useCallback(async () => {
+    try { const r = await fetch('/api/health'); setBackendConnected(r.ok); }
+    catch { setBackendConnected(false); }
+    setLastCheck(new Date());
+  }, []);
+
   useEffect(() => {
     checkBackend();
-    // Check every 5 seconds
-    const interval = setInterval(checkBackend, 5000);
-    return () => clearInterval(interval);
+    const iv = setInterval(checkBackend, 5000);
+    return () => clearInterval(iv);
   }, [checkBackend]);
 
-  const copyToClipboard = useCallback(async (text: string, key: string) => {
-    if (!text) return;
+  // --- Config save ---
+
+  const [configSaved, setConfigSaved] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
+  const handleSaveConfig = useCallback(async () => {
+    setConfigSaved('saving');
     try {
-      await navigator.clipboard.writeText(text);
-      setCopiedKey(key);
-      setTimeout(() => setCopiedKey(null), 2000);
+      const r = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plexUrl, plexToken, tmdbKey, introbKey, library }),
+      });
+      setConfigSaved(r.ok ? 'saved' : 'error');
     } catch {
-      // fallback
+      setConfigSaved('error');
     }
-  }, []);
+    setTimeout(() => setConfigSaved('idle'), 2500);
+  }, [plexUrl, plexToken, tmdbKey, introbKey, library]);
+
+  // --- Scan ---
 
   const handleLoadLibraries = useCallback(async () => {
-    const url = state.plexUrl || 'http://localhost:32400';
-    const token = state.plexToken || '';
-    
-    if (!url || !token) {
-      setState(prev => ({ ...prev, errorMessage: 'Please enter both Plex URL and Token.' }));
-      return;
-    }
-
-    setState(prev => ({ ...prev, loadingLibraries: true, errorMessage: null, logs: [] }));
+    if (!plexUrl || !plexToken) { setErrorMessage('Enter Plex URL and Token first.'); return; }
+    setLoadingLibraries(true); setErrorMessage(null);
     try {
-      const endpoint = `${url}/library/sections`;
-      const headers: Record<string, string> = {
-        'Accept': 'application/json',
-        ...(token && { 'X-Plex-Token': token }),
-      };
-      const response = await fetch(endpoint, { headers });
-      
-      if (!response.ok) {
-        // Better error messages based on status code
-        let errorMsg = `Plex API error: ${response.status}`;
-        if (response.status === 401 || response.status === 403) {
-          errorMsg = 'Invalid Plex token. Please check your credentials.';
-        } else if (response.status === 404 || response.status === 503) {
-          errorMsg = 'Plex server is not responding. Check if the server is running and the URL is correct.';
-        }
-        throw new Error(errorMsg);
-      }
-      
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        const text = await response.text();
-        throw new Error(`Unexpected response format. Try adding /library/sections to the URL.`);
-      }
-      
-      const data = await response.json();
-      const tvLibraries = data.MediaContainer?.Directory
-        ?.filter((s: any) => s.type === 'show')
-        .map((s: any) => s.title) || [];
-      
-      setLibraries(tvLibraries);
-      if (tvLibraries.length > 0) {
-        setState(prev => ({ ...prev, library: tvLibraries[0] }));
-      }
-    } catch (err: any) {
-      setState(prev => ({ ...prev, errorMessage: err.message }));
-    } finally {
-      setState(prev => ({ ...prev, loadingLibraries: false }));
-    }
-  }, [state.plexUrl, state.plexToken]);
+      const r = await fetch(`${plexUrl}/library/sections`, {
+        headers: { Accept: 'application/json', 'X-Plex-Token': plexToken },
+      });
+      if (!r.ok) throw new Error(`Plex error: ${r.status}`);
+      const data = await r.json();
+      const tvLibs = (data.MediaContainer?.Directory ?? [])
+        .filter((s: any) => s.type === 'show').map((s: any) => s.title as string);
+      setLibraries(tvLibs);
+      if (tvLibs.length > 0) setLibrary(tvLibs[0]);
+    } catch (e: any) { setErrorMessage(e.message); }
+    finally { setLoadingLibraries(false); }
+  }, [plexUrl, plexToken]);
 
   const handleStartScan = useCallback(async () => {
-    if (!state.library || !state.tmdbKey || !state.tidbKey) {
-      setState(prev => ({ ...prev, errorMessage: 'All configuration fields are required.' }));
-      return;
-    }
+    if (!library || !tmdbKey || !introbKey) { setErrorMessage('All fields are required.'); return; }
+    if (!backendConnected) { setErrorMessage('Backend not connected.'); return; }
 
-    // Check backend connection before starting
-    if (!state.backendConnected) {
-      setState(prev => ({ ...prev, errorMessage: 'Backend is not connected. Please ensure the Python app is running.' }));
-      return;
-    }
+    setScanStatus('running');
+    setProgress({ current: 0, total: 0, percent: 0 });
+    setLogs([]); setResults([]);
+    setSelectedIds(new Set()); setSubmitResults([]); setSubmittedEpisodes([]);
+    setSubmitDone(false); setSubmitRunning(false);
+    setErrorMessage(null);
+    setCollapsedShows(new Set()); setCollapsedSeasons(new Set());
 
-    setState(prev => ({ 
-      ...prev, 
-      scanning: true, 
-      status: 'running', 
-      progress: { current: 0, total: 0, percent: 0 },
-      logs: [],
-      stats: { total: 0, matched: 0, skipped: 0, failed: 0 },
-      errorMessage: null,
-    }));
-
-    let pollInterval: any = null;
-
+    let poll: ReturnType<typeof setInterval> | null = null;
     try {
-      const response = await fetch('/api/scan', {
+      const r = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ library_name: library, tmdb_api_key: tmdbKey, plex_url: plexUrl, plex_token: plexToken }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || 'Scan failed to start');
+      const taskId = data.task_id;
+
+      poll = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/scan/results?task_id=${taskId}`);
+          const d = await res.json();
+          setProgress(d.progress ?? { current: 0, total: 0, percent: 0 });
+          setLogs(d.log ?? []);
+          setResults(d.results ?? []);
+          setScanStatus(d.status);
+          if (d.status === 'completed' || d.status === 'failed') {
+            if (poll) clearInterval(poll);
+            if (d.status === 'completed') {
+              setSelectedIds(new Set(
+                d.results.filter((r: EpisodeResult) => r.status === 'matched').map(resultKey)
+              ));
+            }
+          }
+        } catch { /* transient */ }
+      }, 1000);
+    } catch (e: any) { setScanStatus('error'); setErrorMessage(e.message); }
+  }, [library, tmdbKey, introbKey, plexUrl, plexToken, backendConnected]);
+
+  // --- Selection ---
+
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds(allSelected ? new Set() : new Set(matchedResults.map(resultKey)));
+  }, [allSelected, matchedResults]);
+
+  const toggleShow = useCallback((show: string) => {
+    const eps = getShowEps(show);
+    const allSel = eps.every(r => selectedIds.has(resultKey(r)));
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      eps.forEach(ep => allSel ? next.delete(resultKey(ep)) : next.add(resultKey(ep)));
+      return next;
+    });
+  }, [selectedIds, matchedResults]);
+
+  const toggleSeason = useCallback((show: string, season: number) => {
+    const eps = getSeasonEps(show, season);
+    const allSel = eps.every(r => selectedIds.has(resultKey(r)));
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      eps.forEach(ep => allSel ? next.delete(resultKey(ep)) : next.add(resultKey(ep)));
+      return next;
+    });
+  }, [selectedIds, matchedResults]);
+
+  const toggleEp = useCallback((key: string) => {
+    setSelectedIds(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  }, []);
+
+  const toggleCollapseShow = useCallback((show: string) => {
+    setCollapsedShows(prev => { const n = new Set(prev); n.has(show) ? n.delete(show) : n.add(show); return n; });
+  }, []);
+
+  const toggleCollapseSeason = useCallback((key: string) => {
+    setCollapsedSeasons(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  }, []);
+
+  // --- Submit ---
+
+  const handleSubmit = useCallback(async () => {
+    const toSubmit = matchedResults.filter(r => selectedIds.has(resultKey(r)));
+    if (!toSubmit.length) return;
+
+    setSubmitRunning(true); setSubmitDone(false);
+    setSubmitResults([]); setSubmittedEpisodes(toSubmit);
+    setSubmitProgress({ current: 0, total: toSubmit.length, percent: 0 });
+    setErrorMessage(null);
+
+    let poll: ReturnType<typeof setInterval> | null = null;
+    try {
+      const r = await fetch('/api/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          library_name: state.library,
-          tmdb_api_key: state.tmdbKey,
-          tidb_api_key: state.tidbKey,
-          dry_run: state.dryRun,
-          plex_url: state.plexUrl,
-          plex_token: state.plexToken,
+          introdb_api_key: introbKey,
+          episodes: toSubmit.map(ep => ({
+            imdb_id: ep.imdb_id, season: ep.season, episode: ep.episode,
+            title: ep.title, start_ms: ep.start_ms, end_ms: ep.end_ms,
+          })),
         }),
       });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || 'Submit failed');
 
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || 'Scan start failed');
-      
-      const taskId = result.task_id;
-      
-      pollInterval = setInterval(async () => {
-        const res = await fetch(`/api/scan/results?task_id=${taskId}`);
-        const data = await res.json();
-        
-        setState(prev => ({
-          ...prev,
-          status: data.status as any,
-          progress: data.progress,
-          logs: data.log,
-          stats: {
-            total: data.results.length,
-            matched: data.results.filter((r: any) => r.status === 'matched').length,
-            skipped: data.results.filter((r: any) => r.status === 'skipped').length,
-            failed: data.results.filter((r: any) => r.status === 'failed').length,
+      const taskId = data.task_id;
+      poll = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/submit/results?task_id=${taskId}`);
+          const d = await res.json();
+          setSubmitProgress({ current: d.current, total: d.total, percent: d.percent });
+          setSubmitResults(d.results);
+          if (d.status === 'completed') {
+            if (poll) clearInterval(poll);
+            setSubmitRunning(false);
+            setSubmitDone(true);
           }
-        }));
-
-        if (data.status === 'completed' || data.status === 'failed') {
-          clearInterval(pollInterval);
-        }
+        } catch { /* transient */ }
       }, 1000);
-
-    } catch (err: any) {
-      setState(prev => ({ ...prev, status: 'error', errorMessage: err.message, scanning: false }));
+    } catch (e: any) {
+      setSubmitRunning(false);
+      setErrorMessage(e.message);
     }
-  }, [state.library, state.tmdbKey, state.tidbKey, state.dryRun, state.plexUrl, state.plexToken, state.backendConnected]);
+  }, [matchedResults, selectedIds, introbKey]);
+
+  // Re-select all failed/rate-limited episodes so the user can retry them
+  const handleRetryFailed = useCallback(() => {
+    const retryIds = new Set(
+      submitResults
+        .map((r, i) => ({ r, ep: submittedEpisodes[i] }))
+        .filter(({ r }) => r.status !== 'submitted')
+        .map(({ ep }) => ep ? resultKey(ep) : '')
+        .filter(Boolean)
+    );
+    setSelectedIds(retryIds);
+    setSubmitResults([]); setSubmittedEpisodes([]);
+    setSubmitDone(false); setSubmitRunning(false);
+  }, [submitResults, submittedEpisodes]);
 
   const handleReset = useCallback(() => {
-    setState({
-      plexUrl: state.plexUrl || 'http://localhost:32400',
-      plexToken: '',
-      tmdbKey: '',
-      tidbKey: '',
-      library: '',
-      dryRun: false,
-      showPlexToken: false,
-      showTmdbKey: false,
-      showTidbKey: false,
-      loadingLibraries: false,
-      scanning: false,
-      progress: { current: 0, total: 0, percent: 0 },
-      logs: [],
-      stats: { total: 0, matched: 0, skipped: 0, failed: 0 },
-      status: 'idle',
-      errorMessage: null,
-      backendConnected: state.backendConnected,
-      lastBackendCheck: state.lastBackendCheck,
-    });
-    setLibraries([]);
-  }, [state.plexUrl, state.backendConnected, state.lastBackendCheck]);
-
-  const handleChange = useCallback((field: keyof Omit<ScanState, 'logs' | 'stats' | 'status' | 'errorMessage' | 'loadingLibraries' | 'scanning' | 'progress' | 'backendConnected' | 'lastBackendCheck' | 'library'>, value: any) => {
-    setState(prev => ({ ...prev, [field]: value }));
+    setScanStatus('idle'); setProgress({ current: 0, total: 0, percent: 0 });
+    setLogs([]); setResults([]); setSelectedIds(new Set());
+    setSubmitResults([]); setSubmittedEpisodes([]); setSubmitDone(false); setSubmitRunning(false);
+    setErrorMessage(null);
   }, []);
 
-  const handleToggle = useCallback((field: 'showPlexToken' | 'showTmdbKey' | 'showTidbKey') => {
-    setState(prev => ({ ...prev, [field]: !prev[field] }));
-  }, []);
+  // --- Helpers ---
 
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case 'matched': return <CheckCircle className="text-emerald-500" />;
-      case 'skipped': return <AlertCircle className="text-amber-500" />;
-      case 'failed': return <XCircle className="text-red-500" />;
-      default: return <Loader2 className="text-blue-500 animate-spin" />;
+      case 'matched':  return <CheckCircle className="text-emerald-500 w-4 h-4" />;
+      case 'skipped':  return <AlertCircle className="text-amber-500 w-4 h-4" />;
+      case 'failed':   return <XCircle className="text-red-500 w-4 h-4" />;
+      default:         return <Loader2 className="text-blue-500 animate-spin w-4 h-4" />;
     }
   };
 
-  const formatDateTime = (date: Date | null) => {
-    if (!date) return 'Never';
-    return date.toLocaleTimeString();
-  };
+  const renderLog = (msg: string) =>
+    msg.includes('<') ? <span dangerouslySetInnerHTML={{ __html: msg }} /> : <span>{msg}</span>;
 
-  // Render log messages that contain HTML (from backend)
-  const renderLogMessage = (message: string) => {
-    // If message contains HTML tags, render as HTML
-    if (message.includes('<')) {
-      return <span dangerouslySetInnerHTML={{ __html: message }} />;
-    }
-    return <span>{message}</span>;
-  };
+  const fmtTime = (d: Date | null) => d ? d.toLocaleTimeString() : 'Never';
+  const fmtSE = (s: number, e: number) => `S${String(s).padStart(2, '0')}E${String(e).padStart(2, '0')}`;
+
+  const isScanning = scanStatus === 'running';
+  const isDone = scanStatus === 'completed';
+  const showSubmitSection = submitRunning || submitDone;
+
+  // --- Render ---
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 text-slate-900 font-sans">
-      {/* Header */}
       <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white">
         <div className="max-w-5xl mx-auto px-4 py-8">
           <div className="flex items-center gap-3 mb-2">
             <Settings2 className="w-6 h-6" />
             <h1 className="text-2xl font-bold">🎬 Plex Intro Uploader</h1>
           </div>
-          <p className="text-blue-100 text-sm">Extract intro markers from your Plex library and submit them to TheIntroDB</p>
+          <p className="text-blue-100 text-sm">Scan your Plex library for intro markers, review results, then submit to IntroDB</p>
         </div>
       </div>
 
-      <div className="max-w-5xl mx-auto px-4 py-6">
-        {/* Backend Status */}
-        <div className="mb-6">
-          <div className="p-4 bg-white/80 backdrop-blur-sm border border-slate-200 rounded-xl shadow-sm">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className={`w-2.5 h-2.5 rounded-full ${state.backendConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-                <div>
-                  <h3 className="font-semibold text-slate-700">
-                    Backend {state.backendConnected ? 'Connected' : 'Disconnected'}
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    Last check: {formatDateTime(state.lastBackendCheck)}
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={checkBackend}
-                className="px-3 py-1.5 text-sm bg-slate-100 hover:bg-slate-200 rounded-md transition-colors text-slate-600"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-              </button>
+      <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
+
+        {/* Backend status */}
+        <div className="p-4 bg-white/80 backdrop-blur-sm border border-slate-200 rounded-xl shadow-sm flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className={`w-2.5 h-2.5 rounded-full ${backendConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+            <div>
+              <h3 className="font-semibold text-slate-700">Backend {backendConnected ? 'Connected' : 'Disconnected'}</h3>
+              <p className="text-xs text-slate-400">Last check: {fmtTime(lastCheck)}</p>
             </div>
           </div>
+          <button onClick={checkBackend} className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors">
+            <RefreshCw className="w-3.5 h-3.5 text-slate-600" />
+          </button>
         </div>
 
-        {/* Configuration Card */}
-        <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
+        {/* Configuration */}
+        <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6">
           <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800">
-            <Database className="text-blue-500 w-5 h-5" />
-            Configuration
+            <Database className="text-blue-500 w-5 h-5" />Configuration
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <InputField
-              label="Plex URL"
-              value={state.plexUrl}
-              onChange={(val) => handleChange('plexUrl' as any, val)}
-              placeholder="http://localhost:32400"
-              icon={Globe}
-              copyKey="plexUrl"
-              isCopied={copiedKey === 'plexUrl'}
-              onCopy={() => copyToClipboard(state.plexUrl, 'plexUrl')}
-            />
-            <InputField
-              label="Plex Token"
-              value={state.plexToken}
-              onChange={(val) => handleChange('plexToken' as any, val)}
-              placeholder="Your Plex API token"
-              icon={Key}
-              type="password"
-              showToggle
-              toggleState={state.showPlexToken}
-              onToggle={() => handleToggle('showPlexToken')}
-              copyKey="plexToken"
-              isCopied={copiedKey === 'plexToken'}
-              onCopy={() => copyToClipboard(state.plexToken, 'plexToken')}
-            />
-            <InputField
-              label="TMDB API Key"
-              value={state.tmdbKey}
-              onChange={(val) => handleChange('tmdbKey' as any, val)}
-              placeholder="tmdb_xxxxxxxxxxx"
-              icon={Key}
-              type="password"
-              showToggle
-              toggleState={state.showTmdbKey}
-              onToggle={() => handleToggle('showTmdbKey')}
-              copyKey="tmdbKey"
-              isCopied={copiedKey === 'tmdbKey'}
-              onCopy={() => copyToClipboard(state.tmdbKey, 'tmdbKey')}
-            />
-            <InputField
-              label="TheIntroDB API Key"
-              value={state.tidbKey}
-              onChange={(val) => handleChange('tidbKey' as any, val)}
-              placeholder="tidb_xxxxxxxxxxx"
-              icon={Key}
-              type="password"
-              showToggle
-              toggleState={state.showTidbKey}
-              onToggle={() => handleToggle('showTidbKey')}
-              copyKey="tidbKey"
-              isCopied={copiedKey === 'tidbKey'}
-              onCopy={() => copyToClipboard(state.tidbKey, 'tidbKey')}
-            />
+            <InputField label="Plex URL" value={plexUrl} onChange={setPlexUrl} placeholder="http://localhost:32400" icon={Globe} />
+            <InputField label="Plex Token" value={plexToken} onChange={setPlexToken} placeholder="Your Plex API token" icon={Key}
+              type="password" showToggle toggleState={showPlexToken} onToggle={() => setShowPlexToken(v => !v)} />
+            <InputField label="TMDB API Key" value={tmdbKey} onChange={setTmdbKey} placeholder="tmdb_xxxxxxxxxxx" icon={Key}
+              type="password" showToggle toggleState={showTmdbKey} onToggle={() => setShowTmdbKey(v => !v)} />
+            <InputField label="IntroDB API Key" value={introbKey} onChange={setIntrobKey} placeholder="idb_..." icon={Key}
+              type="password" showToggle toggleState={showIntrobKey} onToggle={() => setShowIntrobKey(v => !v)} />
             <div className="md:col-span-2">
               <label className="block text-sm font-medium text-slate-600 mb-1">Target Library</label>
-              <select
-                value={state.library}
-                onChange={(e) => setState(prev => ({ ...prev, library: e.target.value }))}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
-              >
-                <option value="">-- Select a library first --</option>
-                {libraries.map((lib) => (
-                  <option key={lib} value={lib}>{lib}</option>
-                ))}
+              <select value={library} onChange={e => setLibrary(e.target.value)}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 transition-all">
+                <option value="">-- Select a library --</option>
+                {libraries.map(l => <option key={l} value={l}>{l}</option>)}
               </select>
             </div>
-            <div className="md:col-span-2 flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="dry-run"
-                checked={state.dryRun}
-                onChange={(e) => setState(prev => ({ ...prev, dryRun: e.target.checked }))}
-                className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500"
-              />
-              <label htmlFor="dry-run" className="text-sm text-slate-600">
-                Dry run (preview without submitting to TheIntroDB)
-              </label>
-            </div>
           </div>
-          <div className="mt-6 flex gap-3">
-            <button
-              onClick={handleLoadLibraries}
-              disabled={state.loadingLibraries || state.scanning}
-              className="px-4 py-2.5 bg-white border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all"
-            >
-              {state.loadingLibraries ? <Loader2 className="animate-spin w-4 h-4" /> : <BookOpen className="w-4 h-4" />}
-              {state.loadingLibraries ? 'Loading...' : 'Load Libraries'}
+          <div className="mt-6 flex gap-3 flex-wrap">
+            <button onClick={handleSaveConfig} disabled={configSaved === 'saving'}
+              className={`px-4 py-2.5 font-medium rounded-lg flex items-center gap-2 transition-all border ${
+                configSaved === 'saved'  ? 'bg-emerald-50 border-emerald-300 text-emerald-700' :
+                configSaved === 'error'  ? 'bg-red-50 border-red-300 text-red-700' :
+                'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}>
+              {configSaved === 'saving' ? <Loader2 className="animate-spin w-4 h-4" /> :
+               configSaved === 'saved'  ? <CheckCircle className="w-4 h-4" /> :
+               configSaved === 'error'  ? <AlertCircle className="w-4 h-4" /> :
+               <Key className="w-4 h-4" />}
+              {configSaved === 'saving' ? 'Saving…' :
+               configSaved === 'saved'  ? 'Saved!' :
+               configSaved === 'error'  ? 'Save failed' : 'Save keys'}
             </button>
-            <button
-              onClick={handleStartScan}
-              disabled={!state.library || state.scanning || state.loadingLibraries || !state.backendConnected}
-              className="flex-1 px-4 py-2.5 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
-            >
-              {state.scanning ? <Loader2 className="animate-spin w-4 h-4" /> : <Play className="w-4 h-4" />}
-              {state.scanning ? 'Scanning...' : 'Start Scan'}
+            <button onClick={handleLoadLibraries} disabled={loadingLibraries || isScanning}
+              className="px-4 py-2.5 bg-white border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all">
+              {loadingLibraries ? <Loader2 className="animate-spin w-4 h-4" /> : <BookOpen className="w-4 h-4" />}
+              {loadingLibraries ? 'Loading...' : 'Load Libraries'}
+            </button>
+            <button onClick={handleStartScan} disabled={!library || isScanning || loadingLibraries || !backendConnected}
+              className="flex-1 px-4 py-2.5 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all">
+              {isScanning ? <Loader2 className="animate-spin w-4 h-4" /> : <Play className="w-4 h-4" />}
+              {isScanning ? 'Scanning...' : 'Scan Library'}
             </button>
           </div>
-          {state.errorMessage && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg flex items-center gap-2 animate-in">
+          {errorMessage && (
+            <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg flex items-center gap-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
-              <span className="text-sm">{state.errorMessage}</span>
+              <span className="text-sm">{errorMessage}</span>
             </div>
           )}
         </div>
 
-        {/* Progress Section */}
-        {(state.scanning || state.status === 'running' || state.logs.length > 0) && (
-          <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
+        {/* Scan log */}
+        {(isScanning || logs.length > 0) && (
+          <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6">
             <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-slate-800">
-              {state.scanning ? <Loader2 className="text-blue-500 animate-spin w-5 h-5" /> : <CheckCircle className="text-green-500 w-5 h-5" />}
+              {isScanning ? <Loader2 className="text-blue-500 animate-spin w-5 h-5" /> : <CheckCircle className="text-green-500 w-5 h-5" />}
               Scan Progress
             </h2>
-            {state.status === 'running' && (
+            {isScanning && (
               <div className="mb-4">
                 <div className="w-full bg-slate-100 rounded-full h-2 mb-1.5">
-                  <div 
-                    className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
-                    style={{ width: `${Math.max(state.progress.percent, 0.1)}%` }}
-                  />
+                  <div className="bg-blue-600 h-2 rounded-full transition-all duration-300" style={{ width: `${Math.max(progress.percent, 0.5)}%` }} />
                 </div>
                 <div className="flex justify-between text-xs text-slate-400">
-                  <span>{state.progress.current} / {state.progress.total} episodes</span>
-                  <span>{Math.round(state.progress.percent)}%</span>
+                  <span>{progress.current} / {progress.total} episodes</span>
+                  <span>{Math.round(progress.percent)}%</span>
                 </div>
               </div>
             )}
-            <div 
-              ref={logContainerRef}
-              className="bg-slate-900 text-slate-100 rounded-lg p-4 h-64 overflow-y-auto font-mono text-xs space-y-1.5 scrollbar-thin"
-            >
-              {state.logs.length === 0 && state.status === 'running' ? (
-                <div className="text-slate-500 italic">Waiting for scan results...</div>
-              ) : (
-                state.logs.map((log, index) => (
-                  <div key={log.id || index} className="flex gap-2.5">
-                    <div className="mt-1.5 min-w-[16px]">{getStatusIcon(log.status)}</div>
-                    <div className="flex-1">
-                      {renderLogMessage(log.message)}
-                    </div>
+            <div ref={logRef} className="bg-slate-900 text-slate-100 rounded-lg p-4 h-64 overflow-y-auto font-mono text-xs space-y-1.5">
+              {logs.length === 0
+                ? <div className="text-slate-500 italic">Waiting…</div>
+                : logs.map((log, i) => (
+                  <div key={i} className="flex gap-2.5">
+                    <div className="mt-0.5 min-w-[16px]">{getStatusIcon(log.status)}</div>
+                    <div className="flex-1">{renderLog(log.message)}</div>
                   </div>
-                ))
-              )}
+                ))}
             </div>
           </div>
         )}
 
-        {/* Summary */}
-        {state.status === 'completed' && (
+        {/* Results */}
+        {isDone && (
           <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6">
             <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800">
-              <CheckCircle className="text-green-500 w-5 h-5" />
-              Scan Summary
+              <CheckCircle className="text-green-500 w-5 h-5" />Scan Results
             </h2>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-              <div className="p-4 bg-slate-50 rounded-xl text-center">
-                <div className="text-2xl font-bold text-slate-700">{state.stats.total}</div>
-                <div className="text-xs text-slate-400 mt-1">Total Episodes</div>
-              </div>
-              <div className="p-4 bg-emerald-50 rounded-xl text-center">
-                <div className="text-2xl font-bold text-emerald-600">{state.stats.matched}</div>
-                <div className="text-xs text-emerald-500 mt-1">Matched</div>
-              </div>
-              <div className="p-4 bg-amber-50 rounded-xl text-center">
-                <div className="text-2xl font-bold text-amber-600">{state.stats.skipped}</div>
-                <div className="text-xs text-amber-500 mt-1">Skipped</div>
-              </div>
-              <div className="p-4 bg-red-50 rounded-xl text-center">
-                <div className="text-2xl font-bold text-red-600">{state.stats.failed}</div>
-                <div className="text-xs text-red-500 mt-1">Failed</div>
-              </div>
+
+            {/* Stats */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+              {[
+                { label: 'Scanned', value: stats.total, bg: 'bg-slate-50', val: 'text-slate-700', lbl: 'text-slate-500' },
+                { label: 'Matched', value: stats.matched, bg: 'bg-emerald-50', val: 'text-emerald-600', lbl: 'text-emerald-500' },
+                { label: 'Skipped', value: stats.skipped, bg: 'bg-amber-50', val: 'text-amber-600', lbl: 'text-amber-500' },
+                { label: 'Failed', value: stats.failed, bg: 'bg-red-50', val: 'text-red-600', lbl: 'text-red-500' },
+              ].map(({ label, value, bg, val, lbl }) => (
+                <div key={label} className={`p-3 ${bg} rounded-xl text-center`}>
+                  <div className={`text-2xl font-bold ${val}`}>{value}</div>
+                  <div className={`text-xs ${lbl} mt-0.5`}>{label}</div>
+                </div>
+              ))}
             </div>
-            <button
-              onClick={handleReset}
-              className="w-full px-4 py-2.5 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 flex items-center justify-center gap-2 transition-all"
-            >
-              <RefreshCw className="w-4 h-4" />
-              Start New Scan
-            </button>
+
+            {/* Grouped results table */}
+            {matchedResults.length > 0 && (
+              <>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-sm text-slate-600">
+                    Select episodes to submit. Click a show or season header to collapse it.
+                    <span className="ml-2 text-slate-400 text-xs">Intro times = seconds from start of episode.</span>
+                  </p>
+                  <span className="text-xs text-slate-400 shrink-0 ml-3">{selectedCount} of {matchedResults.length} selected</span>
+                </div>
+
+                <div className="border border-slate-200 rounded-lg overflow-hidden mb-4">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-3 w-10">
+                          <IndeterminateCheckbox checked={allSelected} indeterminate={anySelected && !allSelected} onChange={toggleSelectAll} />
+                        </th>
+                        <th className="py-3 px-3 text-left font-medium text-slate-600">Show / Episode</th>
+                        <th className="py-3 px-3 text-left font-medium text-slate-600 w-36">Intro (start → end)</th>
+                        <th className="py-3 px-3 text-left font-medium text-slate-600 w-20 hidden md:table-cell">IMDB</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groupedResults.map(({ show, seasons }) => {
+                        const showCollapsed = collapsedShows.has(show);
+                        const showEpCount = getShowEps(show).length;
+                        const showSelCount = getShowEps(show).filter(r => selectedIds.has(resultKey(r))).length;
+                        return (
+                          <React.Fragment key={show}>
+                            <tr className="bg-slate-100 border-y border-slate-200 cursor-pointer hover:bg-slate-200 transition-colors"
+                              onClick={() => toggleCollapseShow(show)}>
+                              <td className="py-2.5 px-3">
+                                <IndeterminateCheckbox checked={isShowSel(show)} indeterminate={isShowPartial(show)} onChange={() => toggleShow(show)} />
+                              </td>
+                              <td className="py-2.5 px-3" colSpan={3}>
+                                <div className="flex items-center gap-2">
+                                  {showCollapsed ? <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />}
+                                  <span className="font-semibold text-slate-800">{show}</span>
+                                  <span className="text-xs text-slate-400">{showSelCount}/{showEpCount} selected</span>
+                                </div>
+                              </td>
+                            </tr>
+                            {!showCollapsed && seasons.map(({ season, episodes }) => {
+                              const seasonKey = `${show}_S${season}`;
+                              const seasonCollapsed = collapsedSeasons.has(seasonKey);
+                              const seasonSelCount = getSeasonEps(show, season).filter(r => selectedIds.has(resultKey(r))).length;
+                              return (
+                                <React.Fragment key={seasonKey}>
+                                  <tr className="bg-slate-50 border-b border-slate-100 cursor-pointer hover:bg-slate-100 transition-colors"
+                                    onClick={() => toggleCollapseSeason(seasonKey)}>
+                                    <td className="py-2 px-3 pl-8">
+                                      <IndeterminateCheckbox checked={isSeasonSel(show, season)} indeterminate={isSeasonPartial(show, season)} onChange={() => toggleSeason(show, season)} />
+                                    </td>
+                                    <td className="py-2 px-3" colSpan={3}>
+                                      <div className="flex items-center gap-2">
+                                        {seasonCollapsed ? <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
+                                        <span className="font-medium text-slate-600 text-xs uppercase tracking-wide">Season {season}</span>
+                                        <span className="text-xs text-slate-400">{seasonSelCount}/{episodes.length} selected</span>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                  {!seasonCollapsed && episodes.map(ep => {
+                                    const key = resultKey(ep);
+                                    const checked = selectedIds.has(key);
+                                    return (
+                                      <tr key={key} onClick={() => toggleEp(key)}
+                                        className={`border-b border-slate-50 cursor-pointer transition-colors ${checked ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-slate-50'}`}>
+                                        <td className="py-2 px-3 pl-12">
+                                          <input type="checkbox" checked={checked} onChange={() => toggleEp(key)}
+                                            onClick={e => e.stopPropagation()}
+                                            className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+                                        </td>
+                                        <td className="py-2 px-3">
+                                          <span className="text-slate-400 font-mono text-xs mr-2">{fmtSE(ep.season, ep.episode)}</span>
+                                          <span className="text-slate-800">{ep.title}</span>
+                                        </td>
+                                        <td className="py-2 px-3 text-slate-500 text-xs whitespace-nowrap">
+                                          {ep.intro_start}s → {ep.intro_end}s
+                                        </td>
+                                        <td className="py-2 px-3 text-slate-300 font-mono text-xs hidden md:table-cell">{ep.imdb_id}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </React.Fragment>
+                              );
+                            })}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="flex gap-3">
+                  <button onClick={handleSubmit} disabled={submitRunning || selectedCount === 0}
+                    className="flex-1 px-4 py-2.5 bg-emerald-600 text-white font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all">
+                    <Upload className="w-4 h-4" />
+                    Submit {selectedCount} Episode{selectedCount !== 1 ? 's' : ''}
+                  </button>
+                  <button onClick={handleReset}
+                    className="px-4 py-2.5 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 flex items-center gap-2 transition-all">
+                    <RefreshCw className="w-4 h-4" />New Scan
+                  </button>
+                </div>
+              </>
+            )}
+
+            {matchedResults.length === 0 && (
+              <div className="text-center py-8 text-slate-400">
+                <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-40" />
+                <p>No intro markers found in this library.</p>
+              </div>
+            )}
           </div>
         )}
 
-        <footer className="mt-8 text-center text-xs text-slate-400 pb-6">
-          <p>Plex Intro Uploader — Powered by FastAPI & TheIntroDB</p>
-          <p className="mt-1">
-            <a href="https://theintrodb.org" className="hover:text-blue-500 transition-colors">TheIntroDB</a> ·
-            <a href="https://www.plex.tv" className="hover:text-blue-500 transition-colors">Plex</a> ·
+        {/* Submission progress + results */}
+        {showSubmitSection && (
+          <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6">
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-slate-800">
+              {submitRunning
+                ? <><Loader2 className="text-blue-500 animate-spin w-5 h-5" />Submitting to IntroDB…</>
+                : <><CheckCircle className="text-green-500 w-5 h-5" />Submission Complete</>}
+            </h2>
+
+            {/* Progress bar */}
+            <div className="mb-4">
+              <div className="w-full bg-slate-100 rounded-full h-2 mb-1.5">
+                <div className="bg-emerald-500 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.max(submitProgress.percent, submitRunning ? 0.5 : 0)}%` }} />
+              </div>
+              <div className="flex justify-between text-xs text-slate-400">
+                <span>{submitProgress.current} / {submitProgress.total} episodes</span>
+                <span>{Math.round(submitProgress.percent)}%</span>
+              </div>
+            </div>
+
+            {/* Summary chips (shown when done) */}
+            {submitDone && (
+              <div className="flex flex-wrap gap-2 mb-4">
+                {submittedCount > 0 && (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-100 text-emerald-700 text-sm font-medium rounded-full">
+                    <CheckCircle className="w-3.5 h-3.5" />{submittedCount} submitted
+                  </span>
+                )}
+                {rejectedCount > 0 && (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-red-100 text-red-700 text-sm font-medium rounded-full">
+                    <XCircle className="w-3.5 h-3.5" />{rejectedCount} rejected by IntroDB
+                  </span>
+                )}
+                {rateLimitedCount > 0 && (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-100 text-amber-700 text-sm font-medium rounded-full">
+                    <AlertTriangle className="w-3.5 h-3.5" />{rateLimitedCount} rate limited
+                  </span>
+                )}
+                {submitErrorCount > 0 && (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-100 text-slate-600 text-sm font-medium rounded-full">
+                    <XCircle className="w-3.5 h-3.5" />{submitErrorCount} errors
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Live results table */}
+            {submitResults.length > 0 && (
+              <div className="border border-slate-200 rounded-lg overflow-hidden mb-4">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="py-2.5 px-3 text-left font-medium text-slate-600">Episode</th>
+                      <th className="py-2.5 px-3 text-left font-medium text-slate-600 w-32">Status</th>
+                      <th className="py-2.5 px-3 text-left font-medium text-slate-600 hidden md:table-cell">Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {submitResults.map((r, i) => (
+                      <tr key={i} className={
+                        r.status === 'submitted'    ? 'bg-emerald-50' :
+                        r.status === 'rate_limited' ? 'bg-amber-50' :
+                        r.status === 'rejected'     ? 'bg-red-50' : ''
+                      }>
+                        <td className="py-2.5 px-3 font-medium text-slate-800">
+                          {fmtSE(r.season, r.episode)} — {r.title}
+                        </td>
+                        <td className="py-2.5 px-3"><StatusChip status={r.status} /></td>
+                        <td className="py-2.5 px-3 text-slate-500 text-xs hidden md:table-cell font-mono">{r.message}</td>
+                      </tr>
+                    ))}
+                    {submitRunning && submitResults.length < submitProgress.total && (
+                      <tr className="animate-pulse">
+                        <td colSpan={3} className="py-2.5 px-3 text-slate-400 text-xs">
+                          <Loader2 className="inline w-3.5 h-3.5 mr-1.5 animate-spin" />
+                          Processing…
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Action buttons */}
+            {submitDone && (
+              <div className="flex gap-3 flex-wrap">
+                {failedSubmitCount > 0 && (
+                  <button onClick={handleRetryFailed}
+                    className="px-4 py-2.5 bg-amber-500 text-white font-medium rounded-lg hover:bg-amber-600 flex items-center gap-2 transition-all">
+                    <RotateCcw className="w-4 h-4" />
+                    Retry failed ({failedSubmitCount})
+                  </button>
+                )}
+                <button onClick={handleReset}
+                  className="px-4 py-2.5 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 flex items-center gap-2 transition-all">
+                  <RefreshCw className="w-4 h-4" />New Scan
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        <footer className="text-center text-xs text-slate-400 pb-6">
+          <p>Plex Intro Uploader — FastAPI · IntroDB</p>
+          <p className="mt-1 space-x-2">
+            <a href="https://introdb.app" className="hover:text-blue-500 transition-colors">IntroDB</a>
+            <span>·</span>
+            <a href="https://www.plex.tv" className="hover:text-blue-500 transition-colors">Plex</a>
+            <span>·</span>
             <a href="https://www.themoviedb.org" className="hover:text-blue-500 transition-colors">TMDB</a>
           </p>
         </footer>
