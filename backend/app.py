@@ -1,16 +1,18 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List
 import httpx
 import asyncio
+import os
 import re
 import uuid
 import json
 import logging
 from pathlib import Path
 
-CONFIG_FILE = Path("config.json")
+CONFIG_FILE = Path(os.environ.get("CONFIG_DIR", ".")) / "config.json"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -396,14 +398,6 @@ def _read_config() -> dict:
 def _write_config(data: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
-@app.get("/", response_class=HTMLResponse)
-async def serve_index():
-    try:
-        with open("backend/static/index.html", "r") as f:
-            return f.read()
-    except FileNotFoundError:
-        return HTMLResponse(content="<h1>Index not found</h1>", status_code=404)
-
 @app.get("/api/health")
 async def health_check():
     return JSONResponse(content={"status": "ok"})
@@ -490,3 +484,9 @@ async def get_submit_results(task_id: str):
         percent=task["percent"],
         results=task["results"]
     )
+
+# Serve the built React frontend (Docker/production only).
+# Only activates if dist/ exists — dev mode is unaffected since Vite serves the frontend.
+_dist = Path(__file__).parent / "dist"
+if _dist.exists():
+    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="static")
