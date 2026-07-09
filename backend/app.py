@@ -12,7 +12,27 @@ import json
 import logging
 from pathlib import Path
 
-CONFIG_FILE = Path(os.environ.get("CONFIG_DIR", ".")) / "config.json"
+CONFIG_FILE    = Path(os.environ.get("CONFIG_DIR", ".")) / "config.json"
+SUBMITTED_FILE = Path(os.environ.get("CONFIG_DIR", ".")) / "submitted.json"
+
+def _load_submitted() -> dict:
+    try:
+        if SUBMITTED_FILE.exists():
+            return json.loads(SUBMITTED_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _mark_submitted(imdb_id: str, season: int, episode: int) -> None:
+    from datetime import datetime, timezone
+    data = _load_submitted()
+    key = f"{imdb_id}:{season}:{episode}"
+    data[key] = datetime.now(timezone.utc).isoformat()
+    SUBMITTED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SUBMITTED_FILE.write_text(json.dumps(data, indent=2))
+
+def _was_submitted(submitted: dict, imdb_id: str, season: int, episode: int) -> bool:
+    return f"{imdb_id}:{season}:{episode}" in submitted
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,6 +85,7 @@ class EpisodeResult(BaseModel):
     end_ms: Optional[int] = None
     status: str
     message: str
+    previously_submitted: bool = False
 
 class ScanStatus(BaseModel):
     status: str
@@ -117,6 +138,7 @@ async def scan_library_task(
     task["status"] = "running"
     plex_headers = {"X-Plex-Token": plex_token, "Accept": "application/json"}
     imdb_id_cache: dict = {}  # tmdb_show_id -> imdb_id
+    submitted = _load_submitted()
 
     async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
         try:
@@ -283,7 +305,8 @@ async def scan_library_task(
                         start_ms=start_ms,
                         end_ms=end_ms,
                         status="matched",
-                        message="Ready to submit"
+                        message="Ready to submit",
+                        previously_submitted=_was_submitted(submitted, imdb_id, season, number)
                     ))
 
                 except Exception as ep_err:
@@ -352,6 +375,7 @@ async def submit_episodes_task(task_id: str, introdb_api_key: str, episodes: Lis
                 elif resp and resp.is_success:
                     result_status = "submitted"
                     result_message = "OK"
+                    _mark_submitted(ep.imdb_id, ep.season, ep.episode)
                 elif resp:
                     result_status = "rejected"
                     body = resp.text[:200].strip()

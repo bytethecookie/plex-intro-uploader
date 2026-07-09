@@ -25,6 +25,7 @@ type EpisodeResult = {
   end_ms?: number;
   status: 'matched' | 'skipped' | 'failed';
   message: string;
+  previously_submitted?: boolean;
 };
 
 type SubmitResult = {
@@ -166,6 +167,7 @@ const Index = () => {
     matched: matchedResults.length,
     skipped: results.filter(r => r.status === 'skipped').length,
     failed: results.filter(r => r.status === 'failed').length,
+    prevSubmitted: matchedResults.filter(r => r.previously_submitted).length,
   }), [results, matchedResults]);
 
   const rateLimitedCount  = submitResults.filter(r => r.status === 'rate_limited').length;
@@ -286,8 +288,11 @@ const Index = () => {
           if (d.status === 'completed' || d.status === 'failed') {
             if (poll) clearInterval(poll);
             if (d.status === 'completed') {
+              // Default-uncheck previously submitted episodes
               setSelectedIds(new Set(
-                d.results.filter((r: EpisodeResult) => r.status === 'matched').map(resultKey)
+                d.results
+                  .filter((r: EpisodeResult) => r.status === 'matched' && !r.previously_submitted)
+                  .map(resultKey)
               ));
             }
           }
@@ -548,12 +553,13 @@ const Index = () => {
             </h2>
 
             {/* Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
               {[
-                { label: 'Scanned', value: stats.total, bg: 'bg-slate-50', val: 'text-slate-700', lbl: 'text-slate-500' },
-                { label: 'Matched', value: stats.matched, bg: 'bg-emerald-50', val: 'text-emerald-600', lbl: 'text-emerald-500' },
-                { label: 'Skipped', value: stats.skipped, bg: 'bg-amber-50', val: 'text-amber-600', lbl: 'text-amber-500' },
-                { label: 'Failed', value: stats.failed, bg: 'bg-red-50', val: 'text-red-600', lbl: 'text-red-500' },
+                { label: 'Scanned',    value: stats.total,         bg: 'bg-slate-50',  val: 'text-slate-700',   lbl: 'text-slate-500' },
+                { label: 'Matched',    value: stats.matched,       bg: 'bg-emerald-50',val: 'text-emerald-600', lbl: 'text-emerald-500' },
+                { label: 'Skipped',    value: stats.skipped,       bg: 'bg-amber-50',  val: 'text-amber-600',   lbl: 'text-amber-500' },
+                { label: 'Failed',     value: stats.failed,        bg: 'bg-red-50',    val: 'text-red-600',     lbl: 'text-red-500' },
+                { label: 'Already sent', value: stats.prevSubmitted, bg: 'bg-blue-50', val: 'text-blue-600',    lbl: 'text-blue-500' },
               ].map(({ label, value, bg, val, lbl }) => (
                 <div key={label} className={`p-3 ${bg} rounded-xl text-center`}>
                   <div className={`text-2xl font-bold ${val}`}>{value}</div>
@@ -582,6 +588,7 @@ const Index = () => {
                         </th>
                         <th className="py-3 px-3 text-left font-medium text-slate-600">Show / Episode</th>
                         <th className="py-3 px-3 text-left font-medium text-slate-600 w-36">Intro (start → end)</th>
+                        <th className="py-3 px-3 text-left font-medium text-slate-600 w-24 hidden md:table-cell">Sent before</th>
                         <th className="py-3 px-3 text-left font-medium text-slate-600 w-20 hidden md:table-cell">IMDB</th>
                       </tr>
                     </thead>
@@ -641,6 +648,13 @@ const Index = () => {
                                         </td>
                                         <td className="py-2 px-3 text-slate-500 text-xs whitespace-nowrap">
                                           {ep.intro_start}s → {ep.intro_end}s
+                                        </td>
+                                        <td className="py-2 px-3 hidden md:table-cell">
+                                          {ep.previously_submitted && (
+                                            <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-600">
+                                              <CheckCircle className="w-3 h-3" />Sent
+                                            </span>
+                                          )}
                                         </td>
                                         <td className="py-2 px-3 text-slate-300 font-mono text-xs hidden md:table-cell">{ep.imdb_id}</td>
                                       </tr>
