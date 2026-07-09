@@ -32,7 +32,7 @@ docker run -d \
   -p 8080:8000 \
   -v plex-uploader-data:/data \
   --name plex-intro-uploader \
-  ghcr.io/nikc0069/plex-intro-uploader:latest
+  ghcr.io/bytethecookie/plex-intro-uploader:latest
 ```
 
 Then open [http://localhost:8080](http://localhost:8080) in your browser.
@@ -42,7 +42,7 @@ Or with Docker Compose — create a `docker-compose.yml`:
 ```yaml
 services:
   plex-intro-uploader:
-    image: ghcr.io/nikc0069/plex-intro-uploader:latest
+    image: ghcr.io/bytethecookie/plex-intro-uploader:latest
     ports:
       - "8080:8000"
     volumes:
@@ -77,7 +77,7 @@ Click **Save** — your config persists in the mounted Docker volume across rest
 ## Building from Source
 
 ```bash
-git clone https://github.com/nikc0069/plex-intro-uploader
+git clone https://github.com/bytethecookie/plex-intro-uploader
 cd plex-intro-uploader
 docker compose up --build
 ```
