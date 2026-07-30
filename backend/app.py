@@ -30,19 +30,28 @@ def _load_submitted() -> dict:
         pass
     return {}
 
-def _mark_submitted(destination: str, imdb_id: str, season: int, episode: int, external_id: Optional[str] = None) -> None:
+def _mark_submitted(
+    destination: str, imdb_id: str, season: int, episode: int,
+    external_id: Optional[str] = None, duration_ms: Optional[int] = None,
+) -> None:
     from datetime import datetime, timezone
     data = _load_submitted()
     key = f"{destination}:{imdb_id}:{season}:{episode}"
     entry = {"at": datetime.now(timezone.utc).isoformat()}
     if external_id is not None:
         entry["id"] = external_id
+    if duration_ms is not None:
+        entry["duration_ms"] = duration_ms
     data[key] = entry
     SUBMITTED_FILE.parent.mkdir(parents=True, exist_ok=True)
     SUBMITTED_FILE.write_text(json.dumps(data, indent=2))
 
 def _was_submitted(submitted: dict, destination: str, imdb_id: str, season: int, episode: int) -> bool:
     return f"{destination}:{imdb_id}:{season}:{episode}" in submitted
+
+def _submitted_entry(submitted: dict, destination: str, imdb_id: str, season: int, episode: int) -> Optional[dict]:
+    entry = submitted.get(f"{destination}:{imdb_id}:{season}:{episode}")
+    return entry if isinstance(entry, dict) else None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -98,6 +107,9 @@ class EpisodeResult(BaseModel):
     message: str
     previously_submitted_introdb: bool = False
     previously_submitted_skipdb: bool = False
+    # duration_ms that was recorded on the existing SkipDB submission, if any (None means
+    # either not submitted yet, or submitted without a duration and eligible for backfill)
+    skipdb_submitted_duration_ms: Optional[int] = None
 
 class ScanStatus(BaseModel):
     status: str
@@ -310,6 +322,8 @@ async def scan_library_task(
                         ))
                         continue
 
+                    skipdb_entry = _submitted_entry(submitted, "skipdb", imdb_id, season, number)
+
                     task["log"].append(LogEntry(
                         status="matched",
                         message=f"<span class='intro-time'>{intro_start}s – {intro_end}s</span> → {imdb_id} S{season}E{number}"
@@ -329,7 +343,8 @@ async def scan_library_task(
                         status="matched",
                         message="Ready to submit",
                         previously_submitted_introdb=_was_submitted(submitted, "introdb", imdb_id, season, number),
-                        previously_submitted_skipdb=_was_submitted(submitted, "skipdb", imdb_id, season, number),
+                        previously_submitted_skipdb=skipdb_entry is not None,
+                        skipdb_submitted_duration_ms=skipdb_entry.get("duration_ms") if skipdb_entry else None,
                     ))
 
                 except Exception as ep_err:
@@ -440,7 +455,11 @@ async def submit_episodes_task(
                                 external_id = None
                             if external_id:
                                 result_message = f"OK (id {external_id})"
-                        _mark_submitted(destination, ep.imdb_id, ep.season, ep.episode, external_id=external_id)
+                        _mark_submitted(
+                            destination, ep.imdb_id, ep.season, ep.episode,
+                            external_id=external_id,
+                            duration_ms=ep.duration_ms if destination == "skipdb" else None,
+                        )
                     elif resp:
                         result_status = "rejected"
                         body = resp.text[:200].strip()
@@ -462,6 +481,122 @@ async def submit_episodes_task(
                 ))
                 task["current"] += 1
                 task["percent"] = round((task["current"] / task["total"]) * 100)
+
+    task["status"] = "completed"
+
+# --- SkipDB duration backfill background task ---
+#
+# For episodes already submitted to SkipDB before we started sending duration_ms (or before
+# Plex had reported a duration at scan time), this PATCHes the existing segment in place rather
+# than creating a new one — SkipDB treats a differently-timed duration as a distinct submission,
+# so this only ever fires for episodes recorded with no duration yet.
+
+class BackfillEpisode(BaseModel):
+    imdb_id: str
+    season: int
+    episode: int
+    title: str
+    duration_ms: int
+
+class BackfillRequest(BaseModel):
+    skipdb_api_key: str
+    episodes: List[BackfillEpisode]
+
+class BackfillResult(BaseModel):
+    title: str
+    season: int
+    episode: int
+    # updated | not_submitted | rejected | rate_limited | error
+    status: str
+    message: str
+    http_status: Optional[int] = None
+
+class BackfillStartResponse(BaseModel):
+    task_id: str
+    total: int
+
+class BackfillTaskStatus(BaseModel):
+    status: str
+    current: int
+    total: int
+    percent: float
+    results: List[BackfillResult] = []
+
+backfill_tasks = {}
+
+async def backfill_duration_task(task_id: str, skipdb_api_key: str, episodes: List[BackfillEpisode]):
+    task = backfill_tasks[task_id]
+    task["status"] = "running"
+    submitted = _load_submitted()
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {skipdb_api_key}",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for ep in episodes:
+            result_status = "error"
+            result_message = "Unknown error"
+            http_status = None
+
+            try:
+                entry = _submitted_entry(submitted, "skipdb", ep.imdb_id, ep.season, ep.episode)
+                segment_id = entry.get("id") if entry else None
+
+                if not segment_id:
+                    result_status = "not_submitted"
+                    result_message = "No tracked SkipDB submission id for this episode"
+                else:
+                    resp = None
+                    rate_limited_out = False
+                    for attempt in range(4):
+                        resp = await client.patch(
+                            f"https://api.skipdb.tv/api/segments/{segment_id}",
+                            headers=headers,
+                            json={"duration_ms": ep.duration_ms},
+                        )
+                        if resp.status_code != 429:
+                            break
+                        if attempt == 3:
+                            rate_limited_out = True
+                            break
+                        wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
+                        logger.info(f"Rate limited backfilling duration for {ep.title} S{ep.season}E{ep.episode}, retrying in {wait}s")
+                        await asyncio.sleep(min(wait, 60))
+
+                    http_status = resp.status_code if resp else None
+
+                    if rate_limited_out or (resp and resp.status_code == 429):
+                        result_status = "rate_limited"
+                        result_message = "Rate limit exhausted — try again later"
+                    elif resp and resp.is_success:
+                        result_status = "updated"
+                        result_message = "Duration updated"
+                        _mark_submitted(
+                            "skipdb", ep.imdb_id, ep.season, ep.episode,
+                            external_id=segment_id, duration_ms=ep.duration_ms,
+                        )
+                    elif resp:
+                        result_status = "rejected"
+                        body = resp.text[:200].strip()
+                        result_message = f"HTTP {resp.status_code}: {body}"
+
+            except Exception as e:
+                result_status = "error"
+                result_message = str(e)[:200]
+
+            task["results"].append(BackfillResult(
+                title=ep.title,
+                season=ep.season,
+                episode=ep.episode,
+                status=result_status,
+                message=result_message,
+                http_status=http_status,
+            ))
+            task["current"] += 1
+            task["percent"] = round((task["current"] / task["total"]) * 100)
 
     task["status"] = "completed"
 
@@ -588,6 +723,38 @@ async def get_submit_results(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     task = submit_tasks[task_id]
     return SubmitTaskStatus(
+        status=task["status"],
+        current=task["current"],
+        total=task["total"],
+        percent=task["percent"],
+        results=task["results"]
+    )
+
+@app.post("/api/skipdb/backfill-duration", response_model=BackfillStartResponse)
+async def start_backfill_duration(request: BackfillRequest):
+    if not request.skipdb_api_key:
+        raise HTTPException(status_code=400, detail="SkipDB API key is required")
+    if not request.episodes:
+        raise HTTPException(status_code=400, detail="No episodes provided")
+
+    logger.info(f"Duration backfill started: {len(request.episodes)} episodes")
+    task_id = str(uuid.uuid4())
+    backfill_tasks[task_id] = {
+        "status": "pending",
+        "current": 0,
+        "total": len(request.episodes),
+        "percent": 0,
+        "results": [],
+    }
+    asyncio.create_task(backfill_duration_task(task_id, request.skipdb_api_key, request.episodes))
+    return BackfillStartResponse(task_id=task_id, total=len(request.episodes))
+
+@app.get("/api/skipdb/backfill-duration/results")
+async def get_backfill_results(task_id: str):
+    if task_id not in backfill_tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task = backfill_tasks[task_id]
+    return BackfillTaskStatus(
         status=task["status"],
         current=task["current"],
         total=task["total"],

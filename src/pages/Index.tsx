@@ -28,6 +28,7 @@ type EpisodeResult = {
   message: string;
   previously_submitted_introdb?: boolean;
   previously_submitted_skipdb?: boolean;
+  skipdb_submitted_duration_ms?: number;
 };
 
 type SubmitResult = {
@@ -40,6 +41,16 @@ type SubmitResult = {
   message: string;
   http_status?: number;
   external_id?: string;
+};
+
+type BackfillResult = {
+  title: string;
+  season: number;
+  episode: number;
+  // updated | not_submitted | rejected | rate_limited | error
+  status: string;
+  message: string;
+  http_status?: number;
 };
 
 // --- Indeterminate checkbox ---
@@ -62,10 +73,12 @@ const IndeterminateCheckbox = ({
 
 const StatusChip = ({ status }: { status: string }) => {
   const cfg: Record<string, { cls: string; icon: React.ReactNode; label: string }> = {
-    submitted:    { cls: 'bg-emerald-100 text-emerald-700', icon: <CheckCircle className="w-3 h-3" />, label: 'Submitted' },
-    rejected:     { cls: 'bg-red-100 text-red-700',         icon: <XCircle className="w-3 h-3" />,     label: 'Rejected' },
-    rate_limited: { cls: 'bg-amber-100 text-amber-700',     icon: <AlertTriangle className="w-3 h-3" />, label: 'Rate limited' },
-    error:        { cls: 'bg-slate-100 text-slate-600',     icon: <XCircle className="w-3 h-3" />,     label: 'Error' },
+    submitted:     { cls: 'bg-emerald-100 text-emerald-700', icon: <CheckCircle className="w-3 h-3" />, label: 'Submitted' },
+    updated:       { cls: 'bg-emerald-100 text-emerald-700', icon: <CheckCircle className="w-3 h-3" />, label: 'Updated' },
+    rejected:      { cls: 'bg-red-100 text-red-700',         icon: <XCircle className="w-3 h-3" />,     label: 'Rejected' },
+    rate_limited:  { cls: 'bg-amber-100 text-amber-700',     icon: <AlertTriangle className="w-3 h-3" />, label: 'Rate limited' },
+    not_submitted: { cls: 'bg-slate-100 text-slate-600',     icon: <AlertCircle className="w-3 h-3" />, label: 'Not tracked' },
+    error:         { cls: 'bg-slate-100 text-slate-600',     icon: <XCircle className="w-3 h-3" />,     label: 'Error' },
   };
   const c = cfg[status] ?? cfg.error;
   return (
@@ -130,12 +143,23 @@ const Index = () => {
   // Keep the ordered list of episodes we submitted so we can match back by index for retry
   const [submittedEpisodes, setSubmittedEpisodes] = useState<EpisodeResult[]>([]);
 
+  // SkipDB duration backfill (PATCH existing submissions that predate duration_ms)
+  const [backfillRunning, setBackfillRunning] = useState(false);
+  const [backfillDone, setBackfillDone] = useState(false);
+  const [backfillProgress, setBackfillProgress] = useState({ current: 0, total: 0, percent: 0 });
+  const [backfillResults, setBackfillResults] = useState<BackfillResult[]>([]);
+
   const logRef = useRef<HTMLDivElement>(null);
 
   // --- Derived ---
 
   const matchedResults = useMemo(() => results.filter(r => r.status === 'matched'), [results]);
   const resultKey = (r: EpisodeResult) => `${r.imdb_id}_S${r.season}E${r.episode}`;
+
+  // Episodes already on SkipDB with no duration on file, where we now have one to fill in
+  const backfillEligible = useMemo(() => matchedResults.filter(r =>
+    r.previously_submitted_skipdb && r.skipdb_submitted_duration_ms == null && r.duration_ms != null
+  ), [matchedResults]);
 
   const groupedResults = useMemo(() => {
     const map: Record<string, Record<number, EpisodeResult[]>> = {};
@@ -460,10 +484,57 @@ const Index = () => {
     runSubmit(retryEpisodes, overrides);
   }, [submitResults, submittedEpisodes, runSubmit]);
 
+  // --- SkipDB duration backfill ---
+
+  const handleBackfillDuration = useCallback(async () => {
+    if (!backfillEligible.length || !skipdbKey) return;
+
+    setBackfillRunning(true); setBackfillDone(false);
+    setBackfillResults([]);
+    setBackfillProgress({ current: 0, total: backfillEligible.length, percent: 0 });
+    setErrorMessage(null);
+
+    let poll: ReturnType<typeof setInterval> | null = null;
+    try {
+      const r = await fetch('/api/skipdb/backfill-duration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          skipdb_api_key: skipdbKey,
+          episodes: backfillEligible.map(ep => ({
+            imdb_id: ep.imdb_id, season: ep.season, episode: ep.episode,
+            title: ep.title, duration_ms: ep.duration_ms,
+          })),
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || 'Backfill failed to start');
+
+      const taskId = data.task_id;
+      poll = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/skipdb/backfill-duration/results?task_id=${taskId}`);
+          const d = await res.json();
+          setBackfillProgress({ current: d.current, total: d.total, percent: d.percent });
+          setBackfillResults(d.results);
+          if (d.status === 'completed') {
+            if (poll) clearInterval(poll);
+            setBackfillRunning(false);
+            setBackfillDone(true);
+          }
+        } catch { /* transient */ }
+      }, 1000);
+    } catch (e: any) {
+      setBackfillRunning(false);
+      setErrorMessage(e.message);
+    }
+  }, [backfillEligible, skipdbKey]);
+
   const handleReset = useCallback(() => {
     setScanStatus('idle'); setProgress({ current: 0, total: 0, percent: 0 });
     setLogs([]); setResults([]); setSelectedIds(new Set());
     setSubmitResults([]); setSubmittedEpisodes([]); setSubmitDone(false); setSubmitRunning(false);
+    setBackfillResults([]); setBackfillDone(false); setBackfillRunning(false);
     setErrorMessage(null);
   }, []);
 
@@ -629,6 +700,42 @@ const Index = () => {
                 </div>
               ))}
             </div>
+
+            {/* SkipDB duration backfill */}
+            {backfillEligible.length > 0 && !backfillRunning && !backfillDone && (
+              <div className="mb-6 p-3.5 bg-purple-50 border border-purple-200 rounded-lg flex items-center justify-between gap-3 flex-wrap">
+                <p className="text-sm text-purple-700">
+                  {backfillEligible.length} episode{backfillEligible.length !== 1 ? 's' : ''} already on SkipDB {backfillEligible.length !== 1 ? 'are' : 'is'} missing a duration timestamp.
+                </p>
+                <button onClick={handleBackfillDuration}
+                  className="px-3.5 py-1.5 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 flex items-center gap-1.5 transition-all shrink-0">
+                  <RotateCcw className="w-3.5 h-3.5" />Backfill duration
+                </button>
+              </div>
+            )}
+
+            {(backfillRunning || backfillDone) && (
+              <div className="mb-6 p-3.5 bg-purple-50 border border-purple-200 rounded-lg">
+                <div className="flex items-center justify-between mb-2 text-sm">
+                  <span className="text-purple-700 font-medium flex items-center gap-1.5">
+                    {backfillRunning
+                      ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Backfilling SkipDB durations…</>
+                      : <><CheckCircle className="w-3.5 h-3.5" />Duration backfill complete</>}
+                  </span>
+                  <span className="text-purple-500 text-xs">{backfillProgress.current} / {backfillProgress.total}</span>
+                </div>
+                {backfillResults.length > 0 && (
+                  <ul className="text-xs space-y-1">
+                    {backfillResults.map((r, i) => (
+                      <li key={i} className="flex items-center gap-2">
+                        <StatusChip status={r.status} />
+                        <span className="text-slate-600">{fmtSE(r.season, r.episode)} — {r.title}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
 
             {/* Grouped results table */}
             {matchedResults.length > 0 && (
