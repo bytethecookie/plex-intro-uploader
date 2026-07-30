@@ -25,13 +25,15 @@ type EpisodeResult = {
   end_ms?: number;
   status: 'matched' | 'skipped' | 'failed';
   message: string;
-  previously_submitted?: boolean;
+  previously_submitted_introdb?: boolean;
+  previously_submitted_skipdb?: boolean;
 };
 
 type SubmitResult = {
   title: string;
   season: number;
   episode: number;
+  destination: string;
   // submitted | rejected | rate_limited | error
   status: string;
   message: string;
@@ -87,6 +89,7 @@ const Index = () => {
   const [plexToken, setPlexToken] = useState<string>(saved.plexToken || '');
   const [tmdbKey, setTmdbKey] = useState<string>(saved.tmdbKey || '');
   const [introbKey, setIntrobKey] = useState<string>(saved.introbKey || '');
+  const [skipdbKey, setSkipdbKey] = useState<string>(saved.skipdbKey || '');
   const [library, setLibrary] = useState<string>(saved.library || '');
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [libraries, setLibraries] = useState<string[]>([]);
@@ -94,6 +97,11 @@ const Index = () => {
   const [showPlexToken, setShowPlexToken] = useState(false);
   const [showTmdbKey, setShowTmdbKey] = useState(false);
   const [showIntrobKey, setShowIntrobKey] = useState(false);
+  const [showSkipdbKey, setShowSkipdbKey] = useState(false);
+
+  // Which community DB(s) to submit to
+  const [submitIntrodb, setSubmitIntrodb] = useState<boolean>(saved.submitIntrodb ?? true);
+  const [submitSkipdb, setSubmitSkipdb] = useState<boolean>(saved.submitSkipdb ?? false);
 
   // Backend
   const [backendConnected, setBackendConnected] = useState(false);
@@ -155,6 +163,12 @@ const Index = () => {
   const allSelected = matchedResults.length > 0 && selectedCount === matchedResults.length;
   const anySelected = selectedCount > 0;
 
+  // Destinations actually usable right now (toggled on AND has an API key configured)
+  const activeDestinations = useMemo(() => [
+    submitIntrodb && introbKey && 'introdb',
+    submitSkipdb && skipdbKey && 'skipdb',
+  ].filter(Boolean) as string[], [submitIntrodb, submitSkipdb, introbKey, skipdbKey]);
+
   const getShowEps    = (show: string) => matchedResults.filter(r => (r.show_title || 'Unknown Show') === show);
   const getSeasonEps  = (show: string, s: number) => matchedResults.filter(r => (r.show_title || 'Unknown Show') === show && r.season === s);
   const isShowSel     = (show: string) => getShowEps(show).every(r => selectedIds.has(resultKey(r)));
@@ -162,19 +176,31 @@ const Index = () => {
   const isSeasonSel   = (show: string, s: number) => getSeasonEps(show, s).every(r => selectedIds.has(resultKey(r)));
   const isSeasonPartial = (show: string, s: number) => { const eps = getSeasonEps(show, s); return eps.some(r => selectedIds.has(resultKey(r))) && !eps.every(r => selectedIds.has(resultKey(r))); };
 
+  // An episode counts as "already sent" once it's been submitted to every destination currently enabled
+  const isFullySent = useCallback((r: EpisodeResult) => {
+    return activeDestinations.length > 0 && activeDestinations.every(d =>
+      d === 'introdb' ? r.previously_submitted_introdb : r.previously_submitted_skipdb
+    );
+  }, [activeDestinations]);
+
   const stats = useMemo(() => ({
     total: results.length,
     matched: matchedResults.length,
     skipped: results.filter(r => r.status === 'skipped').length,
     failed: results.filter(r => r.status === 'failed').length,
-    prevSubmitted: matchedResults.filter(r => r.previously_submitted).length,
-  }), [results, matchedResults]);
+    prevSubmitted: matchedResults.filter(isFullySent).length,
+  }), [results, matchedResults, isFullySent]);
 
   const rateLimitedCount  = submitResults.filter(r => r.status === 'rate_limited').length;
   const rejectedCount     = submitResults.filter(r => r.status === 'rejected').length;
   const submitErrorCount  = submitResults.filter(r => r.status === 'error').length;
   const submittedCount    = submitResults.filter(r => r.status === 'submitted').length;
-  const failedSubmitCount = submitResults.filter(r => r.status !== 'submitted').length;
+
+  // One episode can produce multiple result rows (one per destination) — count distinct failed episodes
+  const failedEpisodeKeys = useMemo(() => new Set(
+    submitResults.filter(r => r.status !== 'submitted').map(r => `${r.season}_${r.episode}_${r.title}`)
+  ), [submitResults]);
+  const failedSubmitCount = failedEpisodeKeys.size;
 
   // --- Persistence ---
 
@@ -188,6 +214,7 @@ const Index = () => {
         if (cfg.plexToken) setPlexToken(cfg.plexToken);
         if (cfg.tmdbKey)   setTmdbKey(cfg.tmdbKey);
         if (cfg.introbKey) setIntrobKey(cfg.introbKey);
+        if (cfg.skipdbKey) setSkipdbKey(cfg.skipdbKey);
         if (cfg.library)   setLibrary(cfg.library);
       })
       .catch(() => { /* backend not up yet — localStorage seed is fine */ });
@@ -195,8 +222,8 @@ const Index = () => {
 
   // Save to localStorage immediately on any change
   useEffect(() => {
-    saveLocalConfig({ plexUrl, plexToken, tmdbKey, introbKey, library });
-  }, [plexUrl, plexToken, tmdbKey, introbKey, library]);
+    saveLocalConfig({ plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library, submitIntrodb, submitSkipdb });
+  }, [plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library, submitIntrodb, submitSkipdb]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -226,14 +253,14 @@ const Index = () => {
       const r = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plexUrl, plexToken, tmdbKey, introbKey, library }),
+        body: JSON.stringify({ plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library }),
       });
       setConfigSaved(r.ok ? 'saved' : 'error');
     } catch {
       setConfigSaved('error');
     }
     setTimeout(() => setConfigSaved('idle'), 2500);
-  }, [plexUrl, plexToken, tmdbKey, introbKey, library]);
+  }, [plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library]);
 
   // --- Scan ---
 
@@ -255,7 +282,8 @@ const Index = () => {
   }, [plexUrl, plexToken]);
 
   const handleStartScan = useCallback(async () => {
-    if (!library || !tmdbKey || !introbKey) { setErrorMessage('All fields are required.'); return; }
+    if (!library || !tmdbKey) { setErrorMessage('Plex library and TMDB key are required.'); return; }
+    if (!introbKey && !skipdbKey) { setErrorMessage('Enter an IntroDB and/or SkipDB API key.'); return; }
     if (!backendConnected) { setErrorMessage('Backend not connected.'); return; }
 
     setScanStatus('running');
@@ -288,10 +316,10 @@ const Index = () => {
           if (d.status === 'completed' || d.status === 'failed') {
             if (poll) clearInterval(poll);
             if (d.status === 'completed') {
-              // Default-uncheck previously submitted episodes
+              // Default-uncheck episodes already sent to every currently enabled destination
               setSelectedIds(new Set(
                 d.results
-                  .filter((r: EpisodeResult) => r.status === 'matched' && !r.previously_submitted)
+                  .filter((r: EpisodeResult) => r.status === 'matched' && !isFullySent(r))
                   .map(resultKey)
               ));
             }
@@ -299,7 +327,7 @@ const Index = () => {
         } catch { /* transient */ }
       }, 1000);
     } catch (e: any) { setScanStatus('error'); setErrorMessage(e.message); }
-  }, [library, tmdbKey, introbKey, plexUrl, plexToken, backendConnected]);
+  }, [library, tmdbKey, introbKey, skipdbKey, plexUrl, plexToken, backendConnected, isFullySent]);
 
   // --- Selection ---
 
@@ -345,9 +373,12 @@ const Index = () => {
     const toSubmit = matchedResults.filter(r => selectedIds.has(resultKey(r)));
     if (!toSubmit.length) return;
 
+    const destinations = activeDestinations;
+    if (!destinations.length) { setErrorMessage('Select at least one destination to submit to.'); return; }
+
     setSubmitRunning(true); setSubmitDone(false);
     setSubmitResults([]); setSubmittedEpisodes(toSubmit);
-    setSubmitProgress({ current: 0, total: toSubmit.length, percent: 0 });
+    setSubmitProgress({ current: 0, total: toSubmit.length * destinations.length, percent: 0 });
     setErrorMessage(null);
 
     let poll: ReturnType<typeof setInterval> | null = null;
@@ -357,6 +388,8 @@ const Index = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           introdb_api_key: introbKey,
+          skipdb_api_key: skipdbKey,
+          destinations,
           episodes: toSubmit.map(ep => ({
             imdb_id: ep.imdb_id, season: ep.season, episode: ep.episode,
             title: ep.title, start_ms: ep.start_ms, end_ms: ep.end_ms,
@@ -384,16 +417,17 @@ const Index = () => {
       setSubmitRunning(false);
       setErrorMessage(e.message);
     }
-  }, [matchedResults, selectedIds, introbKey]);
+  }, [matchedResults, selectedIds, introbKey, skipdbKey, activeDestinations]);
 
-  // Re-select all failed/rate-limited episodes so the user can retry them
+  // Re-select all episodes with at least one failed/rate-limited destination so the user can retry them
   const handleRetryFailed = useCallback(() => {
+    const failedKeys = new Set(
+      submitResults.filter(r => r.status !== 'submitted').map(r => `${r.season}_${r.episode}_${r.title}`)
+    );
     const retryIds = new Set(
-      submitResults
-        .map((r, i) => ({ r, ep: submittedEpisodes[i] }))
-        .filter(({ r }) => r.status !== 'submitted')
-        .map(({ ep }) => ep ? resultKey(ep) : '')
-        .filter(Boolean)
+      submittedEpisodes
+        .filter(ep => failedKeys.has(`${ep.season}_${ep.episode}_${ep.title}`))
+        .map(resultKey)
     );
     setSelectedIds(retryIds);
     setSubmitResults([]); setSubmittedEpisodes([]);
@@ -438,7 +472,7 @@ const Index = () => {
             <Settings2 className="w-6 h-6" />
             <h1 className="text-2xl font-bold">🎬 Plex Intro Uploader</h1>
           </div>
-          <p className="text-blue-100 text-sm">Scan your Plex library for intro markers, review results, then submit to IntroDB</p>
+          <p className="text-blue-100 text-sm">Scan your Plex library for intro markers, review results, then submit to IntroDB and/or SkipDB</p>
         </div>
       </div>
 
@@ -471,6 +505,8 @@ const Index = () => {
               type="password" showToggle toggleState={showTmdbKey} onToggle={() => setShowTmdbKey(v => !v)} />
             <InputField label="IntroDB API Key" value={introbKey} onChange={setIntrobKey} placeholder="idb_..." icon={Key}
               type="password" showToggle toggleState={showIntrobKey} onToggle={() => setShowIntrobKey(v => !v)} />
+            <InputField label="SkipDB API Key" value={skipdbKey} onChange={setSkipdbKey} placeholder="skdb_..." icon={Key}
+              type="password" showToggle toggleState={showSkipdbKey} onToggle={() => setShowSkipdbKey(v => !v)} />
             <div className="md:col-span-2">
               <label className="block text-sm font-medium text-slate-600 mb-1">Target Library</label>
               <select value={library} onChange={e => setLibrary(e.target.value)}
@@ -649,10 +685,15 @@ const Index = () => {
                                         <td className="py-2 px-3 text-slate-500 text-xs whitespace-nowrap">
                                           {ep.intro_start}s → {ep.intro_end}s
                                         </td>
-                                        <td className="py-2 px-3 hidden md:table-cell">
-                                          {ep.previously_submitted && (
+                                        <td className="py-2 px-3 hidden md:table-cell space-x-1">
+                                          {ep.previously_submitted_introdb && (
                                             <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-600">
-                                              <CheckCircle className="w-3 h-3" />Sent
+                                              <CheckCircle className="w-3 h-3" />IntroDB
+                                            </span>
+                                          )}
+                                          {ep.previously_submitted_skipdb && (
+                                            <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-purple-100 text-purple-600">
+                                              <CheckCircle className="w-3 h-3" />SkipDB
                                             </span>
                                           )}
                                         </td>
@@ -670,8 +711,24 @@ const Index = () => {
                   </table>
                 </div>
 
+                <div className="flex items-center gap-4 mb-3 text-sm">
+                  <span className="text-slate-500 font-medium">Submit to:</span>
+                  <label className={`flex items-center gap-1.5 ${!introbKey ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+                    <input type="checkbox" checked={submitIntrodb && !!introbKey} disabled={!introbKey}
+                      onChange={() => setSubmitIntrodb(v => !v)}
+                      className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+                    <span className="text-slate-700">IntroDB</span>
+                  </label>
+                  <label className={`flex items-center gap-1.5 ${!skipdbKey ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+                    <input type="checkbox" checked={submitSkipdb && !!skipdbKey} disabled={!skipdbKey}
+                      onChange={() => setSubmitSkipdb(v => !v)}
+                      className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+                    <span className="text-slate-700">SkipDB</span>
+                  </label>
+                </div>
+
                 <div className="flex gap-3">
-                  <button onClick={handleSubmit} disabled={submitRunning || selectedCount === 0}
+                  <button onClick={handleSubmit} disabled={submitRunning || selectedCount === 0 || activeDestinations.length === 0}
                     className="flex-1 px-4 py-2.5 bg-emerald-600 text-white font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all">
                     <Upload className="w-4 h-4" />
                     Submit {selectedCount} Episode{selectedCount !== 1 ? 's' : ''}
@@ -698,7 +755,7 @@ const Index = () => {
           <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6">
             <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-slate-800">
               {submitRunning
-                ? <><Loader2 className="text-blue-500 animate-spin w-5 h-5" />Submitting to IntroDB…</>
+                ? <><Loader2 className="text-blue-500 animate-spin w-5 h-5" />Submitting…</>
                 : <><CheckCircle className="text-green-500 w-5 h-5" />Submission Complete</>}
             </h2>
 
@@ -724,7 +781,7 @@ const Index = () => {
                 )}
                 {rejectedCount > 0 && (
                   <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-red-100 text-red-700 text-sm font-medium rounded-full">
-                    <XCircle className="w-3.5 h-3.5" />{rejectedCount} rejected by IntroDB
+                    <XCircle className="w-3.5 h-3.5" />{rejectedCount} rejected
                   </span>
                 )}
                 {rateLimitedCount > 0 && (
@@ -747,6 +804,7 @@ const Index = () => {
                   <thead className="bg-slate-50 border-b border-slate-200">
                     <tr>
                       <th className="py-2.5 px-3 text-left font-medium text-slate-600">Episode</th>
+                      <th className="py-2.5 px-3 text-left font-medium text-slate-600 w-24">Destination</th>
                       <th className="py-2.5 px-3 text-left font-medium text-slate-600 w-32">Status</th>
                       <th className="py-2.5 px-3 text-left font-medium text-slate-600 hidden md:table-cell">Detail</th>
                     </tr>
@@ -761,13 +819,14 @@ const Index = () => {
                         <td className="py-2.5 px-3 font-medium text-slate-800">
                           {fmtSE(r.season, r.episode)} — {r.title}
                         </td>
+                        <td className="py-2.5 px-3 text-slate-500 text-xs capitalize">{r.destination}</td>
                         <td className="py-2.5 px-3"><StatusChip status={r.status} /></td>
                         <td className="py-2.5 px-3 text-slate-500 text-xs hidden md:table-cell font-mono">{r.message}</td>
                       </tr>
                     ))}
                     {submitRunning && submitResults.length < submitProgress.total && (
                       <tr className="animate-pulse">
-                        <td colSpan={3} className="py-2.5 px-3 text-slate-400 text-xs">
+                        <td colSpan={4} className="py-2.5 px-3 text-slate-400 text-xs">
                           <Loader2 className="inline w-3.5 h-3.5 mr-1.5 animate-spin" />
                           Processing…
                         </td>
@@ -798,9 +857,11 @@ const Index = () => {
         )}
 
         <footer className="text-center text-xs text-slate-400 pb-6">
-          <p>Plex Intro Uploader — FastAPI · IntroDB</p>
+          <p>Plex Intro Uploader — FastAPI · IntroDB · SkipDB</p>
           <p className="mt-1 space-x-2">
             <a href="https://introdb.app" className="hover:text-blue-500 transition-colors">IntroDB</a>
+            <span>·</span>
+            <a href="https://skipdb.tv" className="hover:text-blue-500 transition-colors">SkipDB</a>
             <span>·</span>
             <a href="https://www.plex.tv" className="hover:text-blue-500 transition-colors">Plex</a>
             <span>·</span>

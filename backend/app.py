@@ -18,21 +18,28 @@ SUBMITTED_FILE = Path(os.environ.get("CONFIG_DIR", ".")) / "submitted.json"
 def _load_submitted() -> dict:
     try:
         if SUBMITTED_FILE.exists():
-            return json.loads(SUBMITTED_FILE.read_text())
+            data = json.loads(SUBMITTED_FILE.read_text())
+            # Migrate legacy keys (pre-destination tracking) to the "introdb:" namespace
+            legacy_keys = [k for k in data if k.count(":") == 2]
+            if legacy_keys:
+                for k in legacy_keys:
+                    data[f"introdb:{k}"] = data.pop(k)
+                SUBMITTED_FILE.write_text(json.dumps(data, indent=2))
+            return data
     except Exception:
         pass
     return {}
 
-def _mark_submitted(imdb_id: str, season: int, episode: int) -> None:
+def _mark_submitted(destination: str, imdb_id: str, season: int, episode: int) -> None:
     from datetime import datetime, timezone
     data = _load_submitted()
-    key = f"{imdb_id}:{season}:{episode}"
+    key = f"{destination}:{imdb_id}:{season}:{episode}"
     data[key] = datetime.now(timezone.utc).isoformat()
     SUBMITTED_FILE.parent.mkdir(parents=True, exist_ok=True)
     SUBMITTED_FILE.write_text(json.dumps(data, indent=2))
 
-def _was_submitted(submitted: dict, imdb_id: str, season: int, episode: int) -> bool:
-    return f"{imdb_id}:{season}:{episode}" in submitted
+def _was_submitted(submitted: dict, destination: str, imdb_id: str, season: int, episode: int) -> bool:
+    return f"{destination}:{imdb_id}:{season}:{episode}" in submitted
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,7 +92,8 @@ class EpisodeResult(BaseModel):
     end_ms: Optional[int] = None
     status: str
     message: str
-    previously_submitted: bool = False
+    previously_submitted_introdb: bool = False
+    previously_submitted_skipdb: bool = False
 
 class ScanStatus(BaseModel):
     status: str
@@ -102,13 +110,16 @@ class SubmitEpisode(BaseModel):
     end_ms: int
 
 class SubmitRequest(BaseModel):
-    introdb_api_key: str
+    introdb_api_key: Optional[str] = None
+    skipdb_api_key: Optional[str] = None
+    destinations: List[str]  # subset of "introdb", "skipdb"
     episodes: List[SubmitEpisode]
 
 class SubmitResult(BaseModel):
     title: str
     season: int
     episode: int
+    destination: str
     # submitted | rejected | rate_limited | error
     status: str
     message: str
@@ -306,7 +317,8 @@ async def scan_library_task(
                         end_ms=end_ms,
                         status="matched",
                         message="Ready to submit",
-                        previously_submitted=_was_submitted(submitted, imdb_id, season, number)
+                        previously_submitted_introdb=_was_submitted(submitted, "introdb", imdb_id, season, number),
+                        previously_submitted_skipdb=_was_submitted(submitted, "skipdb", imdb_id, season, number),
                     ))
 
                 except Exception as ep_err:
@@ -324,77 +336,106 @@ async def scan_library_task(
 
 # --- Submit background task ---
 
-async def submit_episodes_task(task_id: str, introdb_api_key: str, episodes: List[SubmitEpisode]):
+def _build_submission(destination: str, api_key: str, ep: SubmitEpisode):
+    if destination == "introdb":
+        return (
+            "https://api.introdb.app/submit",
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-API-Key": api_key,
+            },
+            {
+                "imdb_id": ep.imdb_id,
+                "segment_type": "intro",
+                "season": ep.season,
+                "episode": ep.episode,
+                "start_sec": round(ep.start_ms / 1000, 3),
+                "end_sec": round(ep.end_ms / 1000, 3),
+            },
+        )
+    elif destination == "skipdb":
+        return (
+            "https://api.skipdb.tv/api/segments",
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            {
+                "imdb_id": ep.imdb_id,
+                "segment_type": "intro",
+                "season": ep.season,
+                "episode": ep.episode,
+                "start_ms": ep.start_ms,
+                "end_ms": ep.end_ms,
+            },
+        )
+    raise ValueError(f"Unknown destination: {destination}")
+
+async def submit_episodes_task(
+    task_id: str,
+    introdb_api_key: Optional[str],
+    skipdb_api_key: Optional[str],
+    destinations: List[str],
+    episodes: List[SubmitEpisode],
+):
     task = submit_tasks[task_id]
     task["status"] = "running"
-
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-API-Key": introdb_api_key,
-    }
+    api_keys = {"introdb": introdb_api_key, "skipdb": skipdb_api_key}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for ep in episodes:
-            result_status = "error"
-            result_message = "Unknown error"
-            http_status = None
-
-            try:
-                payload = {
-                    "imdb_id": ep.imdb_id,
-                    "segment_type": "intro",
-                    "season": ep.season,
-                    "episode": ep.episode,
-                    "start_sec": round(ep.start_ms / 1000, 3),
-                    "end_sec": round(ep.end_ms / 1000, 3),
-                }
-
-                resp = None
-                rate_limited_out = False
-                for attempt in range(4):
-                    resp = await client.post(
-                        "https://api.introdb.app/submit",
-                        headers=headers,
-                        json=payload
-                    )
-                    if resp.status_code != 429:
-                        break
-                    if attempt == 3:
-                        rate_limited_out = True
-                        break
-                    wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
-                    logger.info(f"Rate limited on {ep.title} S{ep.season}E{ep.episode}, retrying in {wait}s")
-                    await asyncio.sleep(min(wait, 60))
-
-                http_status = resp.status_code if resp else None
-
-                if rate_limited_out or (resp and resp.status_code == 429):
-                    result_status = "rate_limited"
-                    result_message = "Rate limit exhausted — try again later"
-                elif resp and resp.is_success:
-                    result_status = "submitted"
-                    result_message = "OK"
-                    _mark_submitted(ep.imdb_id, ep.season, ep.episode)
-                elif resp:
-                    result_status = "rejected"
-                    body = resp.text[:200].strip()
-                    result_message = f"HTTP {resp.status_code}: {body}"
-
-            except Exception as e:
+            for destination in destinations:
                 result_status = "error"
-                result_message = str(e)[:200]
+                result_message = "Unknown error"
+                http_status = None
 
-            task["results"].append(SubmitResult(
-                title=ep.title,
-                season=ep.season,
-                episode=ep.episode,
-                status=result_status,
-                message=result_message,
-                http_status=http_status
-            ))
-            task["current"] += 1
-            task["percent"] = round((task["current"] / task["total"]) * 100)
+                try:
+                    url, headers, payload = _build_submission(destination, api_keys[destination], ep)
+
+                    resp = None
+                    rate_limited_out = False
+                    for attempt in range(4):
+                        resp = await client.post(url, headers=headers, json=payload)
+                        if resp.status_code != 429:
+                            break
+                        if attempt == 3:
+                            rate_limited_out = True
+                            break
+                        wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
+                        logger.info(f"Rate limited on {destination} for {ep.title} S{ep.season}E{ep.episode}, retrying in {wait}s")
+                        await asyncio.sleep(min(wait, 60))
+
+                    http_status = resp.status_code if resp else None
+
+                    if rate_limited_out or (resp and resp.status_code == 429):
+                        result_status = "rate_limited"
+                        result_message = "Rate limit exhausted — try again later"
+                    elif resp and resp.is_success:
+                        result_status = "submitted"
+                        result_message = "OK"
+                        _mark_submitted(destination, ep.imdb_id, ep.season, ep.episode)
+                    elif resp:
+                        result_status = "rejected"
+                        body = resp.text[:200].strip()
+                        result_message = f"HTTP {resp.status_code}: {body}"
+
+                except Exception as e:
+                    result_status = "error"
+                    result_message = str(e)[:200]
+
+                task["results"].append(SubmitResult(
+                    title=ep.title,
+                    season=ep.season,
+                    episode=ep.episode,
+                    destination=destination,
+                    status=result_status,
+                    message=result_message,
+                    http_status=http_status
+                ))
+                task["current"] += 1
+                task["percent"] = round((task["current"] / task["total"]) * 100)
 
     task["status"] = "completed"
 
@@ -405,6 +446,7 @@ class AppConfig(BaseModel):
     plexToken: Optional[str] = None
     tmdbKey: Optional[str] = None
     introbKey: Optional[str] = None
+    skipdbKey: Optional[str] = None
     library: Optional[str] = None
 
 def _read_config() -> dict:
@@ -484,17 +526,31 @@ async def get_scan_results(task_id: str):
 
 @app.post("/api/submit", response_model=SubmitStartResponse)
 async def start_submit(request: SubmitRequest):
-    logger.info(f"Submit started: {len(request.episodes)} episodes")
+    destinations = request.destinations
+    if not destinations:
+        raise HTTPException(status_code=400, detail="No submission destination selected")
+    for d in destinations:
+        if d not in ("introdb", "skipdb"):
+            raise HTTPException(status_code=400, detail=f"Unknown destination: {d}")
+    if "introdb" in destinations and not request.introdb_api_key:
+        raise HTTPException(status_code=400, detail="IntroDB API key is required")
+    if "skipdb" in destinations and not request.skipdb_api_key:
+        raise HTTPException(status_code=400, detail="SkipDB API key is required")
+
+    total = len(request.episodes) * len(destinations)
+    logger.info(f"Submit started: {len(request.episodes)} episodes -> {destinations}")
     task_id = str(uuid.uuid4())
     submit_tasks[task_id] = {
         "status": "pending",
         "current": 0,
-        "total": len(request.episodes),
+        "total": total,
         "percent": 0,
         "results": [],
     }
-    asyncio.create_task(submit_episodes_task(task_id, request.introdb_api_key, request.episodes))
-    return SubmitStartResponse(task_id=task_id, total=len(request.episodes))
+    asyncio.create_task(submit_episodes_task(
+        task_id, request.introdb_api_key, request.skipdb_api_key, destinations, request.episodes
+    ))
+    return SubmitStartResponse(task_id=task_id, total=total)
 
 @app.get("/api/submit/results")
 async def get_submit_results(task_id: str):

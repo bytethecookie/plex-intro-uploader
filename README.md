@@ -1,6 +1,6 @@
 # Plex Intro Uploader
 
-A self-hosted tool that scans your Plex TV library for intro markers and bulk-submits them to [IntroDB](https://introdb.app) — helping build a community-powered database of intro timestamps that benefits everyone using apps like Nuvio, Infuse, and Jellyfin.
+A self-hosted tool that scans your Plex TV library for intro markers and bulk-submits them to [IntroDB](https://introdb.app) and/or [SkipDB](https://skipdb.tv) — helping build community-powered databases of intro timestamps that benefit everyone using apps like Nuvio, Infuse, and Jellyfin.
 
 It finds every episode Plex has already detected an intro for, matches them to IMDB IDs via TMDB, and lets you review and submit them in bulk with a simple web UI.
 
@@ -12,9 +12,9 @@ It finds every episode Plex has already detected an intro for, matches them to I
 >
 > - It may break at any time and without notice
 > - The author accepts **no liability whatsoever** for any consequences of its use, including but not limited to data loss, API bans, or incorrect timestamp submissions
-> - You are responsible for ensuring your use complies with the terms of service of Plex, IntroDB, TMDB, and any other services involved
+> - You are responsible for ensuring your use complies with the terms of service of Plex, IntroDB, SkipDB, TMDB, and any other services involved
 > - Your API keys are stored locally on your own machine and are your responsibility to keep secure
-> - This project is not affiliated with Plex, IntroDB, or TMDB
+> - This project is not affiliated with Plex, IntroDB, SkipDB, or TMDB
 
 ---
 
@@ -23,7 +23,9 @@ It finds every episode Plex has already detected an intro for, matches them to I
 - Docker
 - A [Plex Media Server](https://www.plex.tv/) with intro markers already scanned
 - A [TMDB API key](https://www.themoviedb.org/settings/api) (free)
-- An [IntroDB API key](https://introdb.app) (free, format: `idb_...`)
+- At least one of:
+  - An [IntroDB API key](https://introdb.app) (free, format: `idb_...`)
+  - A [SkipDB API key](https://skipdb.tv/docs) (free, format: `skdb_...`)
 
 ## Running with Docker
 
@@ -63,6 +65,7 @@ On first run, open the app and enter your credentials in the Settings section:
 - **Plex Token** — find yours [here](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
 - **TMDB API Key** — from [themoviedb.org](https://www.themoviedb.org/settings/api)
 - **IntroDB API Key** — from [introdb.app](https://introdb.app) (format: `idb_...`)
+- **SkipDB API Key** — from [skipdb.tv](https://skipdb.tv/docs) (format: `skdb_...`)
 - **Library Name** — the exact name of your TV shows library in Plex
 
 Click **Save** — your config persists in the mounted Docker volume across restarts and image updates.
@@ -71,8 +74,9 @@ Click **Save** — your config persists in the mounted Docker volume across rest
 
 1. Click **Scan** — the tool scans your Plex library for episodes with intro markers and resolves their IMDB IDs
 2. Review the results table — select by show, season, or individual episode
-3. Click **Submit Selected** — submissions are sent with automatic rate-limit backoff and live progress
-4. Use **Retry Failed** to resubmit anything that was rate-limited or errored
+3. Choose which destination(s) to submit to — **IntroDB**, **SkipDB**, or both (only enabled once the matching API key is configured)
+4. Click **Submit Selected** — submissions are sent with automatic rate-limit backoff and live progress per destination
+5. Use **Retry Failed** to resubmit anything that was rate-limited or errored
 
 ## Building from Source
 
