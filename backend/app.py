@@ -416,71 +416,91 @@ async def submit_episodes_task(
     task["status"] = "running"
     api_keys = {"introdb": introdb_api_key, "skipdb": skipdb_api_key}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for ep in episodes:
-            for destination in _effective_destinations(ep, default_destinations):
-                result_status = "error"
-                result_message = "Unknown error"
-                http_status = None
-                external_id = None
-
-                try:
-                    url, headers, payload = _build_submission(destination, api_keys[destination], ep)
-
-                    resp = None
-                    rate_limited_out = False
-                    for attempt in range(4):
-                        resp = await client.post(url, headers=headers, json=payload)
-                        if resp.status_code != 429:
-                            break
-                        if attempt == 3:
-                            rate_limited_out = True
-                            break
-                        wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
-                        logger.info(f"Rate limited on {destination} for {ep.title} S{ep.season}E{ep.episode}, retrying in {wait}s")
-                        await asyncio.sleep(min(wait, 60))
-
-                    http_status = resp.status_code if resp else None
-
-                    if rate_limited_out or (resp and resp.status_code == 429):
-                        result_status = "rate_limited"
-                        result_message = "Rate limit exhausted — try again later"
-                    elif resp and resp.is_success:
-                        result_status = "submitted"
-                        result_message = "OK"
-                        if destination == "skipdb":
-                            try:
-                                external_id = resp.json().get("id")
-                            except Exception:
-                                external_id = None
-                            if external_id:
-                                result_message = f"OK (id {external_id})"
-                        _mark_submitted(
-                            destination, ep.imdb_id, ep.season, ep.episode,
-                            external_id=external_id,
-                            duration_ms=ep.duration_ms if destination == "skipdb" else None,
-                        )
-                    elif resp:
-                        result_status = "rejected"
-                        body = resp.text[:200].strip()
-                        result_message = f"HTTP {resp.status_code}: {body}"
-
-                except Exception as e:
+    # A submission run can be hundreds of episodes long and unattended — nothing in here should
+    # be able to wedge it in "running" forever, so anything truly unexpected is caught at the
+    # top level too, rather than only relying on the per-call try/except below.
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for ep in episodes:
+                for destination in _effective_destinations(ep, default_destinations):
                     result_status = "error"
-                    result_message = str(e)[:200]
+                    result_message = "Unknown error"
+                    http_status = None
+                    external_id = None
 
-                task["results"].append(SubmitResult(
-                    title=ep.title,
-                    season=ep.season,
-                    episode=ep.episode,
-                    destination=destination,
-                    status=result_status,
-                    message=result_message,
-                    http_status=http_status,
-                    external_id=external_id,
-                ))
-                task["current"] += 1
-                task["percent"] = round((task["current"] / task["total"]) * 100)
+                    try:
+                        url, headers, payload = _build_submission(destination, api_keys[destination], ep)
+
+                        resp = None
+                        rate_limited_out = False
+                        for attempt in range(4):
+                            resp = await client.post(url, headers=headers, json=payload)
+                            if resp.status_code != 429:
+                                break
+                            if attempt == 3:
+                                rate_limited_out = True
+                                break
+                            wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
+                            logger.info(f"Rate limited on {destination} for {ep.title} S{ep.season}E{ep.episode}, retrying in {wait}s")
+                            await asyncio.sleep(min(wait, 60))
+
+                        http_status = resp.status_code if resp else None
+
+                        if rate_limited_out or (resp and resp.status_code == 429):
+                            result_status = "rate_limited"
+                            result_message = "Rate limit exhausted — try again later"
+                        elif resp and resp.is_success:
+                            result_status = "submitted"
+                            result_message = "OK"
+                            if destination == "skipdb":
+                                try:
+                                    raw_id = resp.json().get("id")
+                                    # SkipDB's id is numeric; coerce to str to match external_id's type
+                                    external_id = str(raw_id) if raw_id is not None else None
+                                except Exception:
+                                    external_id = None
+                                if external_id:
+                                    result_message = f"OK (id {external_id})"
+                            _mark_submitted(
+                                destination, ep.imdb_id, ep.season, ep.episode,
+                                external_id=external_id,
+                                duration_ms=ep.duration_ms if destination == "skipdb" else None,
+                            )
+                        elif resp:
+                            result_status = "rejected"
+                            body = resp.text[:200].strip()
+                            result_message = f"HTTP {resp.status_code}: {body}"
+
+                    except Exception as e:
+                        result_status = "error"
+                        result_message = str(e)[:200]
+
+                    # Recording the result must never be able to abort the whole batch — an
+                    # unexpected value here should surface as one failed row, not a silent hang.
+                    try:
+                        task["results"].append(SubmitResult(
+                            title=ep.title,
+                            season=ep.season,
+                            episode=ep.episode,
+                            destination=destination,
+                            status=result_status,
+                            message=result_message,
+                            http_status=http_status,
+                            external_id=external_id,
+                        ))
+                    except Exception as e:
+                        task["results"].append(SubmitResult(
+                            title=ep.title,
+                            season=ep.season,
+                            episode=ep.episode,
+                            destination=destination,
+                            status="error",
+                            message=f"Internal error recording result: {str(e)[:150]}",
+                        ))
+                    task["current"] += 1
+                    task["percent"] = round((task["current"] / task["total"]) * 100)
+    except Exception as e:
+        logger.error(f"Submit task {task_id} aborted unexpectedly: {e}")
 
     task["status"] = "completed"
 
@@ -535,68 +555,80 @@ async def backfill_duration_task(task_id: str, skipdb_api_key: str, episodes: Li
         "Authorization": f"Bearer {skipdb_api_key}",
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for ep in episodes:
-            result_status = "error"
-            result_message = "Unknown error"
-            http_status = None
-
-            try:
-                entry = _submitted_entry(submitted, "skipdb", ep.imdb_id, ep.season, ep.episode)
-                segment_id = entry.get("id") if entry else None
-
-                if not segment_id:
-                    result_status = "not_submitted"
-                    result_message = "No tracked SkipDB submission id for this episode"
-                else:
-                    resp = None
-                    rate_limited_out = False
-                    for attempt in range(4):
-                        resp = await client.patch(
-                            f"https://api.skipdb.tv/api/segments/{segment_id}",
-                            headers=headers,
-                            json={"duration_ms": ep.duration_ms},
-                        )
-                        if resp.status_code != 429:
-                            break
-                        if attempt == 3:
-                            rate_limited_out = True
-                            break
-                        wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
-                        logger.info(f"Rate limited backfilling duration for {ep.title} S{ep.season}E{ep.episode}, retrying in {wait}s")
-                        await asyncio.sleep(min(wait, 60))
-
-                    http_status = resp.status_code if resp else None
-
-                    if rate_limited_out or (resp and resp.status_code == 429):
-                        result_status = "rate_limited"
-                        result_message = "Rate limit exhausted — try again later"
-                    elif resp and resp.is_success:
-                        result_status = "updated"
-                        result_message = "Duration updated"
-                        _mark_submitted(
-                            "skipdb", ep.imdb_id, ep.season, ep.episode,
-                            external_id=segment_id, duration_ms=ep.duration_ms,
-                        )
-                    elif resp:
-                        result_status = "rejected"
-                        body = resp.text[:200].strip()
-                        result_message = f"HTTP {resp.status_code}: {body}"
-
-            except Exception as e:
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for ep in episodes:
                 result_status = "error"
-                result_message = str(e)[:200]
+                result_message = "Unknown error"
+                http_status = None
 
-            task["results"].append(BackfillResult(
-                title=ep.title,
-                season=ep.season,
-                episode=ep.episode,
-                status=result_status,
-                message=result_message,
-                http_status=http_status,
-            ))
-            task["current"] += 1
-            task["percent"] = round((task["current"] / task["total"]) * 100)
+                try:
+                    entry = _submitted_entry(submitted, "skipdb", ep.imdb_id, ep.season, ep.episode)
+                    segment_id = entry.get("id") if entry else None
+
+                    if not segment_id:
+                        result_status = "not_submitted"
+                        result_message = "No tracked SkipDB submission id for this episode"
+                    else:
+                        resp = None
+                        rate_limited_out = False
+                        for attempt in range(4):
+                            resp = await client.patch(
+                                f"https://api.skipdb.tv/api/segments/{segment_id}",
+                                headers=headers,
+                                json={"duration_ms": ep.duration_ms},
+                            )
+                            if resp.status_code != 429:
+                                break
+                            if attempt == 3:
+                                rate_limited_out = True
+                                break
+                            wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
+                            logger.info(f"Rate limited backfilling duration for {ep.title} S{ep.season}E{ep.episode}, retrying in {wait}s")
+                            await asyncio.sleep(min(wait, 60))
+
+                        http_status = resp.status_code if resp else None
+
+                        if rate_limited_out or (resp and resp.status_code == 429):
+                            result_status = "rate_limited"
+                            result_message = "Rate limit exhausted — try again later"
+                        elif resp and resp.is_success:
+                            result_status = "updated"
+                            result_message = "Duration updated"
+                            _mark_submitted(
+                                "skipdb", ep.imdb_id, ep.season, ep.episode,
+                                external_id=segment_id, duration_ms=ep.duration_ms,
+                            )
+                        elif resp:
+                            result_status = "rejected"
+                            body = resp.text[:200].strip()
+                            result_message = f"HTTP {resp.status_code}: {body}"
+
+                except Exception as e:
+                    result_status = "error"
+                    result_message = str(e)[:200]
+
+                try:
+                    task["results"].append(BackfillResult(
+                        title=ep.title,
+                        season=ep.season,
+                        episode=ep.episode,
+                        status=result_status,
+                        message=result_message,
+                        http_status=http_status,
+                    ))
+                except Exception as e:
+                    task["results"].append(BackfillResult(
+                        title=ep.title,
+                        season=ep.season,
+                        episode=ep.episode,
+                        status="error",
+                        message=f"Internal error recording result: {str(e)[:150]}",
+                    ))
+                task["current"] += 1
+                task["percent"] = round((task["current"] / task["total"]) * 100)
+    except Exception as e:
+        logger.error(f"Backfill task {task_id} aborted unexpectedly: {e}")
 
     task["status"] = "completed"
 
