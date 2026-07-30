@@ -30,11 +30,14 @@ def _load_submitted() -> dict:
         pass
     return {}
 
-def _mark_submitted(destination: str, imdb_id: str, season: int, episode: int) -> None:
+def _mark_submitted(destination: str, imdb_id: str, season: int, episode: int, external_id: Optional[str] = None) -> None:
     from datetime import datetime, timezone
     data = _load_submitted()
     key = f"{destination}:{imdb_id}:{season}:{episode}"
-    data[key] = datetime.now(timezone.utc).isoformat()
+    entry = {"at": datetime.now(timezone.utc).isoformat()}
+    if external_id is not None:
+        entry["id"] = external_id
+    data[key] = entry
     SUBMITTED_FILE.parent.mkdir(parents=True, exist_ok=True)
     SUBMITTED_FILE.write_text(json.dumps(data, indent=2))
 
@@ -110,11 +113,14 @@ class SubmitEpisode(BaseModel):
     start_ms: int
     end_ms: int
     duration_ms: Optional[int] = None
+    # Overrides SubmitRequest.destinations for just this episode (used to retry only
+    # the destinations that previously failed, without resubmitting to ones that succeeded)
+    destinations: Optional[List[str]] = None
 
 class SubmitRequest(BaseModel):
     introdb_api_key: Optional[str] = None
     skipdb_api_key: Optional[str] = None
-    destinations: List[str]  # subset of "introdb", "skipdb"
+    destinations: List[str] = []  # default destinations, subset of "introdb", "skipdb"
     episodes: List[SubmitEpisode]
 
 class SubmitResult(BaseModel):
@@ -126,6 +132,7 @@ class SubmitResult(BaseModel):
     status: str
     message: str
     http_status: Optional[int] = None
+    external_id: Optional[str] = None
 
 class SubmitStartResponse(BaseModel):
     task_id: str
@@ -380,11 +387,14 @@ def _build_submission(destination: str, api_key: str, ep: SubmitEpisode):
         )
     raise ValueError(f"Unknown destination: {destination}")
 
+def _effective_destinations(ep: SubmitEpisode, default_destinations: List[str]) -> List[str]:
+    return ep.destinations if ep.destinations is not None else default_destinations
+
 async def submit_episodes_task(
     task_id: str,
     introdb_api_key: Optional[str],
     skipdb_api_key: Optional[str],
-    destinations: List[str],
+    default_destinations: List[str],
     episodes: List[SubmitEpisode],
 ):
     task = submit_tasks[task_id]
@@ -393,10 +403,11 @@ async def submit_episodes_task(
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for ep in episodes:
-            for destination in destinations:
+            for destination in _effective_destinations(ep, default_destinations):
                 result_status = "error"
                 result_message = "Unknown error"
                 http_status = None
+                external_id = None
 
                 try:
                     url, headers, payload = _build_submission(destination, api_keys[destination], ep)
@@ -422,7 +433,14 @@ async def submit_episodes_task(
                     elif resp and resp.is_success:
                         result_status = "submitted"
                         result_message = "OK"
-                        _mark_submitted(destination, ep.imdb_id, ep.season, ep.episode)
+                        if destination == "skipdb":
+                            try:
+                                external_id = resp.json().get("id")
+                            except Exception:
+                                external_id = None
+                            if external_id:
+                                result_message = f"OK (id {external_id})"
+                        _mark_submitted(destination, ep.imdb_id, ep.season, ep.episode, external_id=external_id)
                     elif resp:
                         result_status = "rejected"
                         body = resp.text[:200].strip()
@@ -439,7 +457,8 @@ async def submit_episodes_task(
                     destination=destination,
                     status=result_status,
                     message=result_message,
-                    http_status=http_status
+                    http_status=http_status,
+                    external_id=external_id,
                 ))
                 task["current"] += 1
                 task["percent"] = round((task["current"] / task["total"]) * 100)
@@ -533,19 +552,23 @@ async def get_scan_results(task_id: str):
 
 @app.post("/api/submit", response_model=SubmitStartResponse)
 async def start_submit(request: SubmitRequest):
-    destinations = request.destinations
-    if not destinations:
+    default_destinations = request.destinations
+
+    per_episode = [_effective_destinations(ep, default_destinations) for ep in request.episodes]
+    used_destinations = {d for eps in per_episode for d in eps}
+
+    if not used_destinations:
         raise HTTPException(status_code=400, detail="No submission destination selected")
-    for d in destinations:
+    for d in used_destinations:
         if d not in ("introdb", "skipdb"):
             raise HTTPException(status_code=400, detail=f"Unknown destination: {d}")
-    if "introdb" in destinations and not request.introdb_api_key:
+    if "introdb" in used_destinations and not request.introdb_api_key:
         raise HTTPException(status_code=400, detail="IntroDB API key is required")
-    if "skipdb" in destinations and not request.skipdb_api_key:
+    if "skipdb" in used_destinations and not request.skipdb_api_key:
         raise HTTPException(status_code=400, detail="SkipDB API key is required")
 
-    total = len(request.episodes) * len(destinations)
-    logger.info(f"Submit started: {len(request.episodes)} episodes -> {destinations}")
+    total = sum(len(eps) for eps in per_episode)
+    logger.info(f"Submit started: {len(request.episodes)} episodes -> {sorted(used_destinations)}")
     task_id = str(uuid.uuid4())
     submit_tasks[task_id] = {
         "status": "pending",
@@ -555,7 +578,7 @@ async def start_submit(request: SubmitRequest):
         "results": [],
     }
     asyncio.create_task(submit_episodes_task(
-        task_id, request.introdb_api_key, request.skipdb_api_key, destinations, request.episodes
+        task_id, request.introdb_api_key, request.skipdb_api_key, default_destinations, request.episodes
     ))
     return SubmitStartResponse(task_id=task_id, total=total)
 

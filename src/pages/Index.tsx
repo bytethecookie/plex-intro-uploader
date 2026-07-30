@@ -39,6 +39,7 @@ type SubmitResult = {
   status: string;
   message: string;
   http_status?: number;
+  external_id?: string;
 };
 
 // --- Indeterminate checkbox ---
@@ -370,16 +371,23 @@ const Index = () => {
 
   // --- Submit ---
 
-  const handleSubmit = useCallback(async () => {
-    const toSubmit = matchedResults.filter(r => selectedIds.has(resultKey(r)));
+  // Shared submit runner. `destinationOverrides` (keyed by resultKey) lets a retry target only
+  // the destinations that actually failed for a given episode, instead of every active destination.
+  const runSubmit = useCallback(async (
+    toSubmit: EpisodeResult[],
+    destinationOverrides?: Map<string, string[]>
+  ) => {
     if (!toSubmit.length) return;
 
-    const destinations = activeDestinations;
-    if (!destinations.length) { setErrorMessage('Select at least one destination to submit to.'); return; }
+    const totalCalls = toSubmit.reduce(
+      (sum, ep) => sum + (destinationOverrides?.get(resultKey(ep))?.length ?? activeDestinations.length),
+      0
+    );
+    if (totalCalls === 0) { setErrorMessage('Select at least one destination to submit to.'); return; }
 
     setSubmitRunning(true); setSubmitDone(false);
     setSubmitResults([]); setSubmittedEpisodes(toSubmit);
-    setSubmitProgress({ current: 0, total: toSubmit.length * destinations.length, percent: 0 });
+    setSubmitProgress({ current: 0, total: totalCalls, percent: 0 });
     setErrorMessage(null);
 
     let poll: ReturnType<typeof setInterval> | null = null;
@@ -390,11 +398,12 @@ const Index = () => {
         body: JSON.stringify({
           introdb_api_key: introbKey,
           skipdb_api_key: skipdbKey,
-          destinations,
+          destinations: activeDestinations,
           episodes: toSubmit.map(ep => ({
             imdb_id: ep.imdb_id, season: ep.season, episode: ep.episode,
             title: ep.title, start_ms: ep.start_ms, end_ms: ep.end_ms,
             duration_ms: ep.duration_ms,
+            destinations: destinationOverrides?.get(resultKey(ep)),
           })),
         }),
       });
@@ -419,22 +428,37 @@ const Index = () => {
       setSubmitRunning(false);
       setErrorMessage(e.message);
     }
-  }, [matchedResults, selectedIds, introbKey, skipdbKey, activeDestinations]);
+  }, [introbKey, skipdbKey, activeDestinations]);
 
-  // Re-select all episodes with at least one failed/rate-limited destination so the user can retry them
+  const handleSubmit = useCallback(() => {
+    const toSubmit = matchedResults.filter(r => selectedIds.has(resultKey(r)));
+    runSubmit(toSubmit);
+  }, [matchedResults, selectedIds, runSubmit]);
+
+  // Retry only the destinations that actually failed for each episode — an episode that succeeded
+  // on IntroDB but was rate-limited on SkipDB is resubmitted to SkipDB alone, not both again.
   const handleRetryFailed = useCallback(() => {
-    const failedKeys = new Set(
-      submitResults.filter(r => r.status !== 'submitted').map(r => `${r.season}_${r.episode}_${r.title}`)
-    );
-    const retryIds = new Set(
-      submittedEpisodes
-        .filter(ep => failedKeys.has(`${ep.season}_${ep.episode}_${ep.title}`))
-        .map(resultKey)
-    );
-    setSelectedIds(retryIds);
-    setSubmitResults([]); setSubmittedEpisodes([]);
-    setSubmitDone(false); setSubmitRunning(false);
-  }, [submitResults, submittedEpisodes]);
+    const failedDestinationsByEp = new Map<string, Set<string>>();
+    for (const r of submitResults) {
+      if (r.status === 'submitted') continue;
+      const matchKey = `${r.season}_${r.episode}_${r.title}`;
+      if (!failedDestinationsByEp.has(matchKey)) failedDestinationsByEp.set(matchKey, new Set());
+      failedDestinationsByEp.get(matchKey)!.add(r.destination);
+    }
+
+    const retryEpisodes: EpisodeResult[] = [];
+    const overrides = new Map<string, string[]>();
+    for (const ep of submittedEpisodes) {
+      const dests = failedDestinationsByEp.get(`${ep.season}_${ep.episode}_${ep.title}`);
+      if (dests && dests.size > 0) {
+        retryEpisodes.push(ep);
+        overrides.set(resultKey(ep), Array.from(dests));
+      }
+    }
+
+    setSelectedIds(new Set(retryEpisodes.map(resultKey)));
+    runSubmit(retryEpisodes, overrides);
+  }, [submitResults, submittedEpisodes, runSubmit]);
 
   const handleReset = useCallback(() => {
     setScanStatus('idle'); setProgress({ current: 0, total: 0, percent: 0 });
