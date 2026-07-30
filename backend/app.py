@@ -362,9 +362,33 @@ async def scan_library_task(
 
 # --- Submit background task ---
 
-def _build_submission(destination: str, api_key: str, ep: SubmitEpisode):
+async def _find_skipdb_segment_id(client: httpx.AsyncClient, imdb_id: str, season: int, episode: int) -> Optional[str]:
+    """Look up whether an intro segment already exists on SkipDB for this episode, straight from
+    their own API — not our local tracking, which may be missing an id (e.g. pre-dates id capture,
+    or drifted out of sync). This is what lets us PATCH an existing segment instead of blindly
+    POSTing a duplicate."""
+    try:
+        resp = await client.get(
+            "https://api.skipdb.tv/api/segments",
+            params={"imdb_id": imdb_id, "season": season, "episode": episode, "type": "intro"},
+        )
+        if not resp.is_success:
+            return None
+        segments = (resp.json() or {}).get("segments") or {}
+        intro = segments.get("intro")
+        if not intro:
+            return None
+        seg_id = intro.get("id")
+        return str(seg_id) if seg_id is not None else None
+    except Exception:
+        return None
+
+async def _build_submission(client: httpx.AsyncClient, destination: str, api_key: str, ep: SubmitEpisode):
+    """Returns (method, url, headers, payload, existing_id). existing_id is the SkipDB segment id
+    used for a PATCH, when applicable (None otherwise)."""
     if destination == "introdb":
         return (
+            "POST",
             "https://api.introdb.app/submit",
             {
                 "Content-Type": "application/json",
@@ -379,6 +403,7 @@ def _build_submission(destination: str, api_key: str, ep: SubmitEpisode):
                 "start_sec": round(ep.start_ms / 1000, 3),
                 "end_sec": round(ep.end_ms / 1000, 3),
             },
+            None,
         )
     elif destination == "skipdb":
         payload = {
@@ -391,15 +416,15 @@ def _build_submission(destination: str, api_key: str, ep: SubmitEpisode):
         }
         if ep.duration_ms:
             payload["duration_ms"] = ep.duration_ms
-        return (
-            "https://api.skipdb.tv/api/segments",
-            {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            payload,
-        )
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        existing_id = await _find_skipdb_segment_id(client, ep.imdb_id, ep.season, ep.episode)
+        if existing_id:
+            return ("PATCH", f"https://api.skipdb.tv/api/segments/{existing_id}", headers, payload, existing_id)
+        return ("POST", "https://api.skipdb.tv/api/segments", headers, payload, None)
     raise ValueError(f"Unknown destination: {destination}")
 
 def _effective_destinations(ep: SubmitEpisode, default_destinations: List[str]) -> List[str]:
@@ -429,12 +454,14 @@ async def submit_episodes_task(
                     external_id = None
 
                     try:
-                        url, headers, payload = _build_submission(destination, api_keys[destination], ep)
+                        method, url, headers, payload, existing_id = await _build_submission(
+                            client, destination, api_keys[destination], ep
+                        )
 
                         resp = None
                         rate_limited_out = False
                         for attempt in range(4):
-                            resp = await client.post(url, headers=headers, json=payload)
+                            resp = await client.request(method, url, headers=headers, json=payload)
                             if resp.status_code != 429:
                                 break
                             if attempt == 3:
@@ -451,16 +478,16 @@ async def submit_episodes_task(
                             result_message = "Rate limit exhausted — try again later"
                         elif resp and resp.is_success:
                             result_status = "submitted"
-                            result_message = "OK"
+                            result_message = "Updated" if method == "PATCH" else "OK"
                             if destination == "skipdb":
                                 try:
                                     raw_id = resp.json().get("id")
                                     # SkipDB's id is numeric; coerce to str to match external_id's type
-                                    external_id = str(raw_id) if raw_id is not None else None
+                                    external_id = str(raw_id) if raw_id is not None else existing_id
                                 except Exception:
-                                    external_id = None
+                                    external_id = existing_id
                                 if external_id:
-                                    result_message = f"OK (id {external_id})"
+                                    result_message = f"{result_message} (id {external_id})"
                             _mark_submitted(
                                 destination, ep.imdb_id, ep.season, ep.episode,
                                 external_id=external_id,
@@ -565,10 +592,13 @@ async def backfill_duration_task(task_id: str, skipdb_api_key: str, episodes: Li
                 try:
                     entry = _submitted_entry(submitted, "skipdb", ep.imdb_id, ep.season, ep.episode)
                     segment_id = entry.get("id") if entry else None
+                    if not segment_id:
+                        # Not tracked locally (e.g. this predates id capture) — ask SkipDB directly
+                        segment_id = await _find_skipdb_segment_id(client, ep.imdb_id, ep.season, ep.episode)
 
                     if not segment_id:
                         result_status = "not_submitted"
-                        result_message = "No tracked SkipDB submission id for this episode"
+                        result_message = "No SkipDB submission found for this episode"
                     else:
                         resp = None
                         rate_limited_out = False
