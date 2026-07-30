@@ -343,7 +343,7 @@ async def scan_library_task(
                         status="matched",
                         message="Ready to submit",
                         previously_submitted_introdb=_was_submitted(submitted, "introdb", imdb_id, season, number),
-                        previously_submitted_skipdb=skipdb_entry is not None,
+                        previously_submitted_skipdb=_was_submitted(submitted, "skipdb", imdb_id, season, number),
                         skipdb_submitted_duration_ms=skipdb_entry.get("duration_ms") if skipdb_entry else None,
                     ))
 
