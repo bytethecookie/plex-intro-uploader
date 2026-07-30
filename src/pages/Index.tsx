@@ -23,6 +23,7 @@ type EpisodeResult = {
   intro_end?: number;
   start_ms?: number;
   end_ms?: number;
+  duration_ms?: number;
   status: 'matched' | 'skipped' | 'failed';
   message: string;
   previously_submitted_introdb?: boolean;
@@ -393,6 +394,7 @@ const Index = () => {
           episodes: toSubmit.map(ep => ({
             imdb_id: ep.imdb_id, season: ep.season, episode: ep.episode,
             title: ep.title, start_ms: ep.start_ms, end_ms: ep.end_ms,
+            duration_ms: ep.duration_ms,
           })),
         }),
       });

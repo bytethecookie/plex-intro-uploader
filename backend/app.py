@@ -90,6 +90,7 @@ class EpisodeResult(BaseModel):
     intro_end: Optional[float] = None
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None
+    duration_ms: Optional[int] = None
     status: str
     message: str
     previously_submitted_introdb: bool = False
@@ -108,6 +109,7 @@ class SubmitEpisode(BaseModel):
     title: str
     start_ms: int
     end_ms: int
+    duration_ms: Optional[int] = None
 
 class SubmitRequest(BaseModel):
     introdb_api_key: Optional[str] = None
@@ -232,6 +234,7 @@ async def scan_library_task(
                         ep_meta = {}
                     markers = ep_meta.get("Marker", [])
                     intro_marker = next((m for m in markers if m.get("type") == "intro"), None)
+                    duration_ms = ep_meta.get("duration")
 
                     if not intro_marker or not intro_marker.get("startTimeOffset") or not intro_marker.get("endTimeOffset"):
                         marker_types = [m.get("type") for m in markers]
@@ -315,6 +318,7 @@ async def scan_library_task(
                         intro_end=intro_end,
                         start_ms=start_ms,
                         end_ms=end_ms,
+                        duration_ms=duration_ms,
                         status="matched",
                         message="Ready to submit",
                         previously_submitted_introdb=_was_submitted(submitted, "introdb", imdb_id, season, number),
@@ -355,6 +359,16 @@ def _build_submission(destination: str, api_key: str, ep: SubmitEpisode):
             },
         )
     elif destination == "skipdb":
+        payload = {
+            "imdb_id": ep.imdb_id,
+            "segment_type": "intro",
+            "season": ep.season,
+            "episode": ep.episode,
+            "start_ms": ep.start_ms,
+            "end_ms": ep.end_ms,
+        }
+        if ep.duration_ms:
+            payload["duration_ms"] = ep.duration_ms
         return (
             "https://api.skipdb.tv/api/segments",
             {
@@ -362,14 +376,7 @@ def _build_submission(destination: str, api_key: str, ep: SubmitEpisode):
                 "Accept": "application/json",
                 "Authorization": f"Bearer {api_key}",
             },
-            {
-                "imdb_id": ep.imdb_id,
-                "segment_type": "intro",
-                "season": ep.season,
-                "episode": ep.episode,
-                "start_ms": ep.start_ms,
-                "end_ms": ep.end_ms,
-            },
+            payload,
         )
     raise ValueError(f"Unknown destination: {destination}")
 
