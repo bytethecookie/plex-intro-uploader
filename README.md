@@ -65,7 +65,7 @@ On first run, open the app and enter your credentials in the Settings section:
 - **Plex Token** — find yours [here](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
 - **TMDB API Key** — from [themoviedb.org](https://www.themoviedb.org/settings/api)
 - **IntroDB API Key** — from [introdb.app](https://introdb.app) (format: `idb_...`)
-- **SkipDB API Key** — from [skipdb.tv](https://skipdb.tv/docs) (format: `skdb_...`)
+- **SkipDB API Key** — from [skipdb.tv](https://skipdb.tv/docs) (format: `skdb_...`). SkipDB lets you get a key without signing up, but that key is anonymous. Use a key from a **registered SkipDB account** if you want submissions that collide with an already-approved segment to auto-vote it up — voting is rejected for anonymous keys, so with one of those the tool will just report the duplicate instead.
 - **Library Name** — the exact name of your TV shows library in Plex
 
 Click **Save** — your config persists in the mounted Docker volume across restarts and image updates.

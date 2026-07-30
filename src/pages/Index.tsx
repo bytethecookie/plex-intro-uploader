@@ -602,8 +602,13 @@ const Index = () => {
               type="password" showToggle toggleState={showTmdbKey} onToggle={() => setShowTmdbKey(v => !v)} />
             <InputField label="IntroDB API Key" value={introbKey} onChange={setIntrobKey} placeholder="idb_..." icon={Key}
               type="password" showToggle toggleState={showIntrobKey} onToggle={() => setShowIntrobKey(v => !v)} />
-            <InputField label="SkipDB API Key" value={skipdbKey} onChange={setSkipdbKey} placeholder="skdb_..." icon={Key}
-              type="password" showToggle toggleState={showSkipdbKey} onToggle={() => setShowSkipdbKey(v => !v)} />
+            <div>
+              <InputField label="SkipDB API Key" value={skipdbKey} onChange={setSkipdbKey} placeholder="skdb_..." icon={Key}
+                type="password" showToggle toggleState={showSkipdbKey} onToggle={() => setShowSkipdbKey(v => !v)} />
+              <p className="text-xs text-slate-400 mt-1">
+                Use a key from a registered SkipDB account, not an anonymous one — anonymous keys can't vote, so when a submission collides with an already-approved segment it'll be reported as a duplicate instead of auto-upvoted.
+              </p>
+            </div>
             <div className="md:col-span-2">
               <label className="block text-sm font-medium text-slate-600 mb-1">Target Library</label>
               <select value={library} onChange={e => setLibrary(e.target.value)}
