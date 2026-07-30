@@ -383,6 +383,44 @@ async def _find_skipdb_segment_id(client: httpx.AsyncClient, imdb_id: str, seaso
     except Exception:
         return None
 
+async def _handle_skipdb_conflict(client: httpx.AsyncClient, resp: httpx.Response, headers: dict, ep: SubmitEpisode):
+    """SkipDB returned 409 because an identical segment is already approved. It hands us a
+    vote_url instead of letting us write a duplicate — SkipDB's own vote endpoint already knows
+    whether it's our segment (403) or someone else's (in which case we upvote it). Returns
+    (status, message, external_id)."""
+    try:
+        conflict_body = resp.json()
+    except Exception:
+        conflict_body = {}
+
+    conflict_id = conflict_body.get("id")
+    conflict_id_str = str(conflict_id) if conflict_id is not None else None
+    vote_url = conflict_body.get("vote_url")
+
+    if not vote_url:
+        return "rejected", f"HTTP 409: {resp.text[:200].strip()}", None
+
+    vote_full_url = vote_url if vote_url.startswith("http") else f"https://api.skipdb.tv{vote_url}"
+
+    try:
+        vote_resp = await client.post(vote_full_url, headers=headers, json={"value": 1})
+    except Exception as e:
+        return "rejected", f"Duplicate exists (id {conflict_id_str}); vote attempt failed: {str(e)[:120]}", None
+
+    if vote_resp.status_code == 429:
+        return "rate_limited", f"Duplicate exists (id {conflict_id_str}); rate limited while trying to vote — try again later", None
+    if vote_resp.is_success:
+        _mark_submitted("skipdb", ep.imdb_id, ep.season, ep.episode, external_id=conflict_id_str, duration_ms=ep.duration_ms)
+        return "submitted", f"Voted up existing segment (id {conflict_id_str})", conflict_id_str
+    if vote_resp.status_code == 403:
+        # SkipDB itself confirms this is already our own segment
+        _mark_submitted("skipdb", ep.imdb_id, ep.season, ep.episode, external_id=conflict_id_str, duration_ms=ep.duration_ms)
+        return "submitted", f"Already your own segment (id {conflict_id_str})", conflict_id_str
+    if vote_resp.status_code == 401:
+        return "rejected", f"Duplicate exists (id {conflict_id_str}) — voting needs a registered SkipDB account, not an anonymous API key", None
+
+    return "rejected", f"Duplicate exists (id {conflict_id_str}); vote attempt failed: HTTP {vote_resp.status_code}: {vote_resp.text[:120].strip()}", None
+
 async def _build_submission(client: httpx.AsyncClient, destination: str, api_key: str, ep: SubmitEpisode):
     """Returns (method, url, headers, payload, existing_id). existing_id is the SkipDB segment id
     used for a PATCH, when applicable (None otherwise)."""
@@ -492,6 +530,12 @@ async def submit_episodes_task(
                                 destination, ep.imdb_id, ep.season, ep.episode,
                                 external_id=external_id,
                                 duration_ms=ep.duration_ms if destination == "skipdb" else None,
+                            )
+                        elif resp and resp.status_code == 409 and destination == "skipdb":
+                            # SkipDB rejects a submission identical to an already-approved segment
+                            # and points us at a vote endpoint instead of letting us write a duplicate.
+                            result_status, result_message, external_id = await _handle_skipdb_conflict(
+                                client, resp, headers, ep
                             )
                         elif resp:
                             result_status = "rejected"
