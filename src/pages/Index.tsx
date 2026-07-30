@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Play, CheckCircle, XCircle, Loader2, Globe, Key, Database, BookOpen,
   AlertCircle, RefreshCw, Upload, Settings2, ChevronDown, ChevronRight,
-  AlertTriangle, RotateCcw,
+  AlertTriangle, RotateCcw, Clock, Zap,
 } from 'lucide-react';
 import InputField from '@/components/InputField';
 
@@ -53,6 +53,30 @@ type BackfillResult = {
   http_status?: number;
 };
 
+type ScheduleRunLogEntry = {
+  started_at: string;
+  finished_at?: string | null;
+  // running | completed | skipped | failed
+  status: string;
+  scanned: number;
+  matched: number;
+  to_submit: number;
+  submitted: number;
+  rejected: number;
+  rate_limited: number;
+  error: number;
+  message: string;
+};
+
+type ScheduleStatus = {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  running: boolean;
+  next_run: string | null;
+  history: ScheduleRunLogEntry[];
+};
+
 // --- Indeterminate checkbox ---
 
 const IndeterminateCheckbox = ({
@@ -79,6 +103,10 @@ const StatusChip = ({ status }: { status: string }) => {
     rate_limited:  { cls: 'bg-amber-100 text-amber-700',     icon: <AlertTriangle className="w-3 h-3" />, label: 'Rate limited' },
     not_submitted: { cls: 'bg-slate-100 text-slate-600',     icon: <AlertCircle className="w-3 h-3" />, label: 'Not tracked' },
     error:         { cls: 'bg-slate-100 text-slate-600',     icon: <XCircle className="w-3 h-3" />,     label: 'Error' },
+    completed:     { cls: 'bg-emerald-100 text-emerald-700', icon: <CheckCircle className="w-3 h-3" />, label: 'Completed' },
+    skipped:       { cls: 'bg-slate-100 text-slate-600',     icon: <AlertCircle className="w-3 h-3" />, label: 'Skipped' },
+    failed:        { cls: 'bg-red-100 text-red-700',         icon: <XCircle className="w-3 h-3" />,     label: 'Failed' },
+    running:       { cls: 'bg-blue-100 text-blue-700',       icon: <Loader2 className="w-3 h-3 animate-spin" />, label: 'Running' },
   };
   const c = cfg[status] ?? cfg.error;
   return (
@@ -117,6 +145,12 @@ const Index = () => {
   // Which community DB(s) to submit to
   const [submitIntrodb, setSubmitIntrodb] = useState<boolean>(saved.submitIntrodb ?? true);
   const [submitSkipdb, setSubmitSkipdb] = useState<boolean>(saved.submitSkipdb ?? false);
+
+  // Scheduled (unattended) runs
+  const [scheduleEnabled, setScheduleEnabled] = useState<boolean>(saved.scheduleEnabled ?? false);
+  const [scheduleTime, setScheduleTime] = useState<string>(saved.scheduleTime || '03:00');
+  const [scheduleStatus, setScheduleStatus] = useState<ScheduleStatus | null>(null);
+  const [triggeringRun, setTriggeringRun] = useState(false);
 
   // Backend
   const [backendConnected, setBackendConnected] = useState(false);
@@ -242,14 +276,25 @@ const Index = () => {
         if (cfg.introbKey) setIntrobKey(cfg.introbKey);
         if (cfg.skipdbKey) setSkipdbKey(cfg.skipdbKey);
         if (cfg.library)   setLibrary(cfg.library);
+        if (cfg.submitIntrodb !== undefined) setSubmitIntrodb(!!cfg.submitIntrodb);
+        if (cfg.submitSkipdb !== undefined) setSubmitSkipdb(!!cfg.submitSkipdb);
+        if (cfg.scheduleEnabled !== undefined) setScheduleEnabled(!!cfg.scheduleEnabled);
+        if (cfg.scheduleHour !== undefined || cfg.scheduleMinute !== undefined) {
+          const h = cfg.scheduleHour ?? 3;
+          const m = cfg.scheduleMinute ?? 0;
+          setScheduleTime(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+        }
       })
       .catch(() => { /* backend not up yet — localStorage seed is fine */ });
   }, []);
 
   // Save to localStorage immediately on any change
   useEffect(() => {
-    saveLocalConfig({ plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library, submitIntrodb, submitSkipdb });
-  }, [plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library, submitIntrodb, submitSkipdb]);
+    saveLocalConfig({
+      plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library,
+      submitIntrodb, submitSkipdb, scheduleEnabled, scheduleTime,
+    });
+  }, [plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library, submitIntrodb, submitSkipdb, scheduleEnabled, scheduleTime]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -269,24 +314,53 @@ const Index = () => {
     return () => clearInterval(iv);
   }, [checkBackend]);
 
+  // --- Scheduled runs ---
+
+  const fetchScheduleStatus = useCallback(async () => {
+    try {
+      const r = await fetch('/api/schedule/status');
+      if (r.ok) setScheduleStatus(await r.json());
+    } catch { /* transient */ }
+  }, []);
+
+  useEffect(() => {
+    fetchScheduleStatus();
+    const iv = setInterval(fetchScheduleStatus, 15000);
+    return () => clearInterval(iv);
+  }, [fetchScheduleStatus]);
+
+  const handleRunNow = useCallback(async () => {
+    setTriggeringRun(true);
+    try {
+      await fetch('/api/schedule/run-now', { method: 'POST' });
+      await fetchScheduleStatus();
+    } catch { /* transient */ }
+    finally { setTriggeringRun(false); }
+  }, [fetchScheduleStatus]);
+
   // --- Config save ---
 
   const [configSaved, setConfigSaved] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   const handleSaveConfig = useCallback(async () => {
     setConfigSaved('saving');
+    const [h, m] = scheduleTime.split(':').map(Number);
     try {
       const r = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library }),
+        body: JSON.stringify({
+          plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library,
+          submitIntrodb, submitSkipdb,
+          scheduleEnabled, scheduleHour: h, scheduleMinute: m,
+        }),
       });
       setConfigSaved(r.ok ? 'saved' : 'error');
     } catch {
       setConfigSaved('error');
     }
     setTimeout(() => setConfigSaved('idle'), 2500);
-  }, [plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library]);
+  }, [plexUrl, plexToken, tmdbKey, introbKey, skipdbKey, library, submitIntrodb, submitSkipdb, scheduleEnabled, scheduleTime]);
 
   // --- Scan ---
 
@@ -554,6 +628,7 @@ const Index = () => {
 
   const fmtTime = (d: Date | null) => d ? d.toLocaleTimeString() : 'Never';
   const fmtSE = (s: number, e: number) => `S${String(s).padStart(2, '0')}E${String(e).padStart(2, '0')}`;
+  const fmtDateTime = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : '—';
 
   const isScanning = scanStatus === 'running';
   const isDone = scanStatus === 'completed';
@@ -648,6 +723,95 @@ const Index = () => {
             <div className="mt-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg flex items-center gap-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
               <span className="text-sm">{errorMessage}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Scheduled Runs */}
+        <div className="bg-white/80 backdrop-blur-sm rounded-xl shadow-sm border border-slate-200 p-6">
+          <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800">
+            <Clock className="text-blue-500 w-5 h-5" />Scheduled Runs
+          </h2>
+
+          <div className="flex items-center gap-4 mb-3 flex-wrap">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={scheduleEnabled} onChange={() => setScheduleEnabled(v => !v)}
+                className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+              <span className="text-sm font-medium text-slate-700">Run automatically every day at</span>
+            </label>
+            <input type="time" value={scheduleTime} onChange={e => setScheduleTime(e.target.value)}
+              disabled={!scheduleEnabled}
+              className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 disabled:opacity-50" />
+          </div>
+
+          <div className="flex items-center gap-4 mb-4 flex-wrap text-sm">
+            <span className="text-slate-500 font-medium">Submit to:</span>
+            <label className={`flex items-center gap-1.5 ${!introbKey ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+              <input type="checkbox" checked={submitIntrodb && !!introbKey} disabled={!introbKey}
+                onChange={() => setSubmitIntrodb(v => !v)}
+                className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+              <span className="text-slate-700">IntroDB</span>
+            </label>
+            <label className={`flex items-center gap-1.5 ${!skipdbKey ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+              <input type="checkbox" checked={submitSkipdb && !!skipdbKey} disabled={!skipdbKey}
+                onChange={() => setSubmitSkipdb(v => !v)}
+                className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+              <span className="text-slate-700">SkipDB</span>
+            </label>
+          </div>
+
+          <p className="text-xs text-slate-400 mb-4">
+            An automatic run scans your configured library and submits everything matched that isn't already fully sent to the destinations checked above — there's no review step, so make sure that's what you want sent unattended.
+          </p>
+
+          <div className="flex gap-3 flex-wrap mb-4">
+            <button onClick={handleSaveConfig} disabled={configSaved === 'saving'}
+              className={`px-4 py-2.5 font-medium rounded-lg flex items-center gap-2 transition-all border ${
+                configSaved === 'saved'  ? 'bg-emerald-50 border-emerald-300 text-emerald-700' :
+                configSaved === 'error'  ? 'bg-red-50 border-red-300 text-red-700' :
+                'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}>
+              {configSaved === 'saving' ? <Loader2 className="animate-spin w-4 h-4" /> :
+               configSaved === 'saved'  ? <CheckCircle className="w-4 h-4" /> :
+               configSaved === 'error'  ? <AlertCircle className="w-4 h-4" /> :
+               <Clock className="w-4 h-4" />}
+              {configSaved === 'saving' ? 'Saving…' :
+               configSaved === 'saved'  ? 'Saved!' :
+               configSaved === 'error'  ? 'Save failed' : 'Save Schedule'}
+            </button>
+            <button onClick={handleRunNow} disabled={triggeringRun || scheduleStatus?.running}
+              className="px-4 py-2.5 bg-emerald-600 text-white font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all">
+              {triggeringRun || scheduleStatus?.running ? <Loader2 className="animate-spin w-4 h-4" /> : <Zap className="w-4 h-4" />}
+              {scheduleStatus?.running ? 'Running…' : 'Run Now'}
+            </button>
+          </div>
+
+          <p className="text-xs text-slate-500 mb-4">
+            {scheduleStatus?.enabled
+              ? <>Next automatic run: <span className="font-medium text-slate-700">{fmtDateTime(scheduleStatus.next_run)}</span></>
+              : 'Automatic runs are off.'}
+          </p>
+
+          {scheduleStatus && scheduleStatus.history.length > 0 && (
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th className="py-2 px-3 text-left font-medium text-slate-600">When</th>
+                    <th className="py-2 px-3 text-left font-medium text-slate-600 w-28">Result</th>
+                    <th className="py-2 px-3 text-left font-medium text-slate-600 hidden md:table-cell">Detail</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {scheduleStatus.history.map((h, i) => (
+                    <tr key={i}>
+                      <td className="py-2 px-3 text-slate-600 whitespace-nowrap">{fmtDateTime(h.started_at)}</td>
+                      <td className="py-2 px-3"><StatusChip status={h.status} /></td>
+                      <td className="py-2 px-3 text-slate-500 text-xs hidden md:table-cell">{h.message}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>

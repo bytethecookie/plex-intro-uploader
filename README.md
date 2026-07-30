@@ -78,6 +78,12 @@ Click **Save** — your config persists in the mounted Docker volume across rest
 4. Click **Submit Selected** — submissions are sent with automatic rate-limit backoff and live progress per destination
 5. Use **Retry Failed** to resubmit anything that was rate-limited or errored
 
+## Scheduled Runs
+
+Instead of (or alongside) running things manually, you can turn on **Scheduled Runs** in the app to have it sit in the background and, once a day at a time you choose, automatically scan your configured library and submit anything matched that isn't already fully sent to whichever destinations you've checked. There's no review step — it submits everything eligible, so make sure the destination checkboxes reflect what you actually want sent unattended.
+
+The schedule, destination choices, and a rolling history of recent automatic runs persist in the Docker volume, so they survive container restarts and image updates. A **Run Now** button is also available to trigger the same scan-and-submit immediately, without waiting for the scheduled time.
+
 ## Building from Source
 
 ```bash

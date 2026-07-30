@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import httpx
 import asyncio
 import os
@@ -12,8 +13,10 @@ import json
 import logging
 from pathlib import Path
 
-CONFIG_FILE    = Path(os.environ.get("CONFIG_DIR", ".")) / "config.json"
-SUBMITTED_FILE = Path(os.environ.get("CONFIG_DIR", ".")) / "submitted.json"
+CONFIG_FILE       = Path(os.environ.get("CONFIG_DIR", ".")) / "config.json"
+SUBMITTED_FILE    = Path(os.environ.get("CONFIG_DIR", ".")) / "submitted.json"
+SCHEDULE_LOG_FILE = Path(os.environ.get("CONFIG_DIR", ".")) / "schedule_log.json"
+SCHEDULE_LOG_LIMIT = 20
 
 def _load_submitted() -> dict:
     try:
@@ -53,6 +56,21 @@ def _submitted_entry(submitted: dict, destination: str, imdb_id: str, season: in
     entry = submitted.get(f"{destination}:{imdb_id}:{season}:{episode}")
     return entry if isinstance(entry, dict) else None
 
+def _load_schedule_log() -> list:
+    try:
+        if SCHEDULE_LOG_FILE.exists():
+            return json.loads(SCHEDULE_LOG_FILE.read_text())
+    except Exception:
+        pass
+    return []
+
+def _append_schedule_log(entry: dict) -> None:
+    log = _load_schedule_log()
+    log.insert(0, entry)
+    log = log[:SCHEDULE_LOG_LIMIT]
+    SCHEDULE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SCHEDULE_LOG_FILE.write_text(json.dumps(log, indent=2))
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -60,6 +78,9 @@ app = FastAPI(title="Plex Intro Uploader")
 
 scan_tasks = {}
 submit_tasks = {}
+
+scheduler = AsyncIOScheduler()
+schedule_state = {"running": False}
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -715,6 +736,11 @@ class AppConfig(BaseModel):
     introbKey: Optional[str] = None
     skipdbKey: Optional[str] = None
     library: Optional[str] = None
+    submitIntrodb: Optional[bool] = None
+    submitSkipdb: Optional[bool] = None
+    scheduleEnabled: Optional[bool] = None
+    scheduleHour: Optional[int] = None
+    scheduleMinute: Optional[int] = None
 
 def _read_config() -> dict:
     try:
@@ -731,6 +757,163 @@ def _read_config() -> dict:
 def _write_config(data: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
+# --- Scheduled (unattended) scan + submit ---
+
+class ScheduleRunLogEntry(BaseModel):
+    started_at: str
+    finished_at: Optional[str] = None
+    status: str  # running | completed | skipped | failed
+    scanned: int = 0
+    matched: int = 0
+    to_submit: int = 0
+    submitted: int = 0
+    rejected: int = 0
+    rate_limited: int = 0
+    error: int = 0
+    message: str = ""
+
+class ScheduleStatus(BaseModel):
+    enabled: bool
+    hour: int
+    minute: int
+    running: bool
+    next_run: Optional[str] = None
+    history: List[ScheduleRunLogEntry] = []
+
+def _reschedule_from_config() -> None:
+    cfg = _read_config()
+    try:
+        scheduler.remove_job("auto_run")
+    except Exception:
+        pass
+    if cfg.get("scheduleEnabled"):
+        hour = cfg.get("scheduleHour", 3)
+        minute = cfg.get("scheduleMinute", 0)
+        scheduler.add_job(
+            run_scheduled_pipeline, "cron", hour=hour, minute=minute,
+            id="auto_run", replace_existing=True,
+        )
+        logger.info(f"Scheduled run enabled: daily at {hour:02d}:{minute:02d}")
+    else:
+        logger.info("Scheduled run disabled")
+
+async def run_scheduled_pipeline() -> None:
+    """Unattended scan-then-submit: everything matched and not already fully sent to whichever
+    destinations are configured/enabled. No human is present to pick episodes, so this is the
+    closest equivalent of clicking 'select all not-yet-sent' and 'Submit'."""
+    if schedule_state["running"]:
+        logger.info("Scheduled run skipped — a run is already in progress")
+        return
+    schedule_state["running"] = True
+
+    from datetime import datetime, timezone
+    entry = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "status": "running",
+        "scanned": 0, "matched": 0, "to_submit": 0,
+        "submitted": 0, "rejected": 0, "rate_limited": 0, "error": 0,
+        "message": "",
+    }
+
+    try:
+        cfg = _read_config()
+        plex_url = cfg.get("plexUrl") or "http://localhost:32400"
+        plex_token = cfg.get("plexToken") or ""
+        library = cfg.get("library")
+        tmdb_key = cfg.get("tmdbKey")
+        introdb_key = cfg.get("introbKey")
+        skipdb_key = cfg.get("skipdbKey")
+
+        destinations = []
+        if cfg.get("submitIntrodb", True) and introdb_key:
+            destinations.append("introdb")
+        if cfg.get("submitSkipdb", False) and skipdb_key:
+            destinations.append("skipdb")
+
+        if not library or not tmdb_key:
+            entry["status"] = "skipped"
+            entry["message"] = "No library or TMDB key configured"
+            return
+        if not destinations:
+            entry["status"] = "skipped"
+            entry["message"] = "No submission destination configured (check API keys and Submit-to toggles)"
+            return
+
+        logger.info(f"Scheduled run starting: library={library} destinations={destinations}")
+
+        scan_task_id = str(uuid.uuid4())
+        scan_tasks[scan_task_id] = {
+            "status": "pending", "current": 0, "total": 0, "percent": 0,
+            "log": [], "results": [],
+        }
+        await scan_library_task(scan_task_id, plex_url, plex_token, library, tmdb_key)
+        scan_result = scan_tasks[scan_task_id]
+
+        entry["scanned"] = len(scan_result["results"])
+        matched = [r for r in scan_result["results"] if r.status == "matched"]
+        entry["matched"] = len(matched)
+
+        if scan_result["status"] != "completed":
+            entry["status"] = "failed"
+            entry["message"] = "Scan did not complete"
+            return
+
+        to_submit = []
+        for r in matched:
+            needed = [
+                d for d in destinations
+                if not (r.previously_submitted_introdb if d == "introdb" else r.previously_submitted_skipdb)
+            ]
+            if needed:
+                to_submit.append((r, needed))
+
+        entry["to_submit"] = len(to_submit)
+
+        if not to_submit:
+            entry["status"] = "completed"
+            entry["message"] = "No new episodes to submit"
+            return
+
+        episodes = [
+            SubmitEpisode(
+                imdb_id=r.imdb_id, season=r.season, episode=r.episode, title=r.title,
+                start_ms=r.start_ms, end_ms=r.end_ms, duration_ms=r.duration_ms,
+                destinations=needed,
+            )
+            for r, needed in to_submit
+        ]
+        total = sum(len(needed) for _, needed in to_submit)
+
+        submit_task_id = str(uuid.uuid4())
+        submit_tasks[submit_task_id] = {
+            "status": "pending", "current": 0, "total": total, "percent": 0, "results": [],
+        }
+        await submit_episodes_task(submit_task_id, introdb_key, skipdb_key, destinations, episodes)
+        submit_result = submit_tasks[submit_task_id]
+
+        for r in submit_result["results"]:
+            if r.status in entry:
+                entry[r.status] += 1
+
+        entry["status"] = "completed"
+        entry["message"] = f"Submitted {entry['submitted']} of {total} destination calls for {len(to_submit)} episodes"
+        logger.info(f"Scheduled run finished: {entry['message']}")
+
+    except Exception as e:
+        entry["status"] = "failed"
+        entry["message"] = f"Unexpected error: {str(e)[:200]}"
+        logger.error(f"Scheduled run failed: {e}")
+    finally:
+        entry["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _append_schedule_log(entry)
+        schedule_state["running"] = False
+
+@app.on_event("startup")
+async def _on_startup():
+    scheduler.start()
+    _reschedule_from_config()
+
 @app.get("/api/health")
 async def health_check():
     return JSONResponse(content={"status": "ok"})
@@ -742,6 +925,7 @@ async def get_config():
 @app.post("/api/config")
 async def save_config(config: AppConfig):
     _write_config(config.model_dump(exclude_none=True))
+    _reschedule_from_config()
     return JSONResponse(content={"status": "ok"})
 
 @app.get("/api/libraries")
@@ -867,6 +1051,27 @@ async def get_backfill_results(task_id: str):
         percent=task["percent"],
         results=task["results"]
     )
+
+@app.get("/api/schedule/status", response_model=ScheduleStatus)
+async def get_schedule_status():
+    cfg = _read_config()
+    job = scheduler.get_job("auto_run")
+    next_run = job.next_run_time.isoformat() if job and job.next_run_time else None
+    return ScheduleStatus(
+        enabled=bool(cfg.get("scheduleEnabled", False)),
+        hour=cfg.get("scheduleHour", 3),
+        minute=cfg.get("scheduleMinute", 0),
+        running=schedule_state["running"],
+        next_run=next_run,
+        history=_load_schedule_log(),
+    )
+
+@app.post("/api/schedule/run-now")
+async def run_schedule_now():
+    if schedule_state["running"]:
+        return JSONResponse(content={"status": "already_running"})
+    asyncio.create_task(run_scheduled_pipeline())
+    return JSONResponse(content={"status": "started"})
 
 # Serve the built React frontend (Docker/production only).
 # Only activates if dist/ exists — dev mode is unaffected since Vite serves the frontend.
